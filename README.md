@@ -56,7 +56,7 @@ DBを使うテストは、接続できない場合・テーブルが未作成の
 cp .env.example .env                                                  # 初回のみ。値を埋める
 cp config/distributor-csv-mappings.example.json config/distributor-csv-mappings.json
 ./run.sh                                    # catalogs/ 配下を全件チェックして取り込む
-./run.sh -prefix catalogs/<卸ID>/           # 特定の卸だけ
+./run.sh -prefix catalogs/<卸コード>/       # 特定の卸だけ
 ```
 
 出力は「反映 / 要確認 / スキップ(取り込み済み)」の3種類。詳細は

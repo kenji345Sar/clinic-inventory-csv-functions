@@ -7,9 +7,6 @@ import (
 	"strings"
 
 	ingapp "clinic-inventory-csv-functions/internal/application/distributorcsvingestion"
-	shareddomain "clinic-inventory-csv-functions/internal/domain/shared"
-
-	"github.com/google/uuid"
 )
 
 // ColumnMapping は1社分のCSV読み取り定義
@@ -43,19 +40,20 @@ type ColumnIndexes struct {
 	FacilityUnitPrice *int `json:"facilityUnitPrice"`
 }
 
-// MappingParserResolver は卸IDに対応するパーサを返す。マッピング定義はJSONファイルで持つ。
-// 卸IDは実行時に採番されるUUIDのためソースに埋め込まず、設定ファイルに外出ししている。
+// MappingParserResolver は卸コードに対応するパーサを返す。マッピング定義はJSONファイルで持つ。
+// 卸ごとのCSVの読み方は業務データではなく取り込み側の都合のため、DBではなく設定ファイルに置く。
 type MappingParserResolver struct {
-	mappings map[uuid.UUID]ColumnMapping
+	mappings map[string]ColumnMapping
 }
 
-func NewMappingParserResolver(mappings map[uuid.UUID]ColumnMapping) *MappingParserResolver {
+func NewMappingParserResolver(mappings map[string]ColumnMapping) *MappingParserResolver {
 	return &MappingParserResolver{mappings: mappings}
 }
 
 // LoadMappings は設定ファイルを読み込む。形式は
-// { "<卸ID(UUID)>": { "encoding": ..., "columns": {...} }, ... }
-func LoadMappings(path string) (map[uuid.UUID]ColumnMapping, error) {
+// { "<卸コード>": { "encoding": ..., "columns": {...} }, ... }
+// 卸コードはbackendの distributors.code と一致させる（S3のフォルダ名にもなる）。
+func LoadMappings(path string) (map[string]ColumnMapping, error) {
 	body, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("CSVマッピング定義の読み込みに失敗しました(%s): %w", path, err)
@@ -65,38 +63,25 @@ func LoadMappings(path string) (map[uuid.UUID]ColumnMapping, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("CSVマッピング定義の形式が不正です(%s): %w", path, err)
 	}
-	mappings := make(map[uuid.UUID]ColumnMapping, len(raw))
-	for key, value := range raw {
+	mappings := make(map[string]ColumnMapping, len(raw))
+	for code, value := range raw {
 		// JSONにはコメント構文が無いため、"_"始まりのキーを注記として扱う。
-		if strings.HasPrefix(key, "_") {
+		if strings.HasPrefix(code, "_") {
 			continue
-		}
-		id, err := uuid.Parse(key)
-		if err != nil {
-			return nil, fmt.Errorf("CSVマッピング定義のキーが卸ID(UUID)ではありません: %s", key)
 		}
 		var mapping ColumnMapping
 		if err := json.Unmarshal(value, &mapping); err != nil {
-			return nil, fmt.Errorf("卸業者 %s のCSVマッピング定義の形式が不正です: %w", key, err)
+			return nil, fmt.Errorf("卸コード %s のCSVマッピング定義の形式が不正です: %w", code, err)
 		}
-		mappings[id] = mapping
+		mappings[code] = mapping
 	}
 	return mappings, nil
 }
 
-func (r *MappingParserResolver) Resolve(distributorID shareddomain.ID) (ingapp.CatalogCsvParser, error) {
-	mapping, ok := r.mappings[uuid.UUID(distributorID)]
+func (r *MappingParserResolver) Resolve(distributorCode string) (ingapp.CatalogCsvParser, error) {
+	mapping, ok := r.mappings[distributorCode]
 	if !ok {
-		return nil, fmt.Errorf("卸業者 %s のCSVマッピング定義がありません。設定ファイルに追加してください", distributorID)
+		return nil, fmt.Errorf("卸コード %s のCSVマッピング定義がありません。設定ファイルに追加してください", distributorCode)
 	}
 	return NewMappingCsvParser(mapping), nil
-}
-
-// DistributorIDs は定義済みの卸IDを返す（取り込み対象のプレフィックスを決めるのに使う）。
-func (r *MappingParserResolver) DistributorIDs() []shareddomain.ID {
-	ids := make([]shareddomain.ID, 0, len(r.mappings))
-	for id := range r.mappings {
-		ids = append(ids, shareddomain.ID(id))
-	}
-	return ids
 }

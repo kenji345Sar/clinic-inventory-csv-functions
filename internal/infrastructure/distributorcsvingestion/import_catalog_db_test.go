@@ -59,40 +59,43 @@ func openTestDB(t *testing.T) *gorm.DB {
 
 // setupDistributorAndFacility はテスト用の卸業者とクリニックを用意し、後始末を登録する。
 // これらのテーブルはbackendの管理下にあるため、ドメインを介さず直接INSERTする。
-func setupDistributorAndFacility(t *testing.T, db *gorm.DB) (shareddomain.ID, shareddomain.ID) {
+func setupDistributorAndFacility(t *testing.T, db *gorm.DB) (code string, distributorID, facilityID shareddomain.ID) {
 	t.Helper()
 
-	distributorID := uuid.New()
+	distributorUUID := uuid.New()
 	corporationID := uuid.New()
-	facilityID := uuid.New()
+	facilityUUID := uuid.New()
+	// 卸コードはS3のフォルダ名になる識別子。テスト同士がぶつからないよう毎回一意にする。
+	distributorCode := "test-" + distributorUUID.String()[:8]
 
-	if err := db.Exec("INSERT INTO distributors (id, name) VALUES (?, ?)", distributorID, "取り込みテスト卸_"+distributorID.String()[:8]).Error; err != nil {
+	if err := db.Exec("INSERT INTO distributors (id, code, name) VALUES (?, ?, ?)", distributorUUID, distributorCode, "取り込みテスト卸_"+distributorCode).Error; err != nil {
 		t.Fatalf("failed to insert distributor: %v", err)
 	}
 	if err := db.Exec("INSERT INTO corporations (id, name) VALUES (?, ?)", corporationID, "取り込みテスト法人").Error; err != nil {
 		t.Fatalf("failed to insert corporation: %v", err)
 	}
 	if err := db.Exec("INSERT INTO facilities (id, name, facility_type, corporation_id) VALUES (?, ?, ?, ?)",
-		facilityID, "取り込みテスト医院", "medical", corporationID).Error; err != nil {
+		facilityUUID, "取り込みテスト医院", "medical", corporationID).Error; err != nil {
 		t.Fatalf("failed to insert facility: %v", err)
 	}
 
 	t.Cleanup(func() {
-		db.Exec("DELETE FROM distributor_product_facility_prices WHERE facility_id = ?", facilityID)
-		db.Exec("DELETE FROM distributor_products WHERE distributor_id = ?", distributorID)
-		db.Exec("DELETE FROM distributor_catalog_staging_rows WHERE ingestion_run_id IN (SELECT id FROM distributor_catalog_ingestion_runs WHERE distributor_id = ?)", distributorID)
-		db.Exec("DELETE FROM distributor_catalog_ingestion_runs WHERE distributor_id = ?", distributorID)
-		db.Exec("DELETE FROM facilities WHERE id = ?", facilityID)
+		db.Exec("DELETE FROM distributor_product_facility_prices WHERE facility_id = ?", facilityUUID)
+		db.Exec("DELETE FROM distributor_products WHERE distributor_id = ?", distributorUUID)
+		db.Exec("DELETE FROM distributor_catalog_staging_rows WHERE ingestion_run_id IN (SELECT id FROM distributor_catalog_ingestion_runs WHERE distributor_id = ?)", distributorUUID)
+		db.Exec("DELETE FROM distributor_catalog_ingestion_runs WHERE distributor_id = ?", distributorUUID)
+		db.Exec("DELETE FROM facilities WHERE id = ?", facilityUUID)
 		db.Exec("DELETE FROM corporations WHERE id = ?", corporationID)
-		db.Exec("DELETE FROM distributors WHERE id = ?", distributorID)
+		db.Exec("DELETE FROM distributors WHERE id = ?", distributorUUID)
 	})
-	return shareddomain.ID(distributorID), shareddomain.ID(facilityID)
+	return distributorCode, shareddomain.ID(distributorUUID), shareddomain.ID(facilityUUID)
 }
 
-func newImportUseCase(db *gorm.DB, store fakeObjectStore, mappings map[uuid.UUID]inginfra.ColumnMapping) *ingapp.ImportDistributorCatalogUseCase {
+func newImportUseCase(db *gorm.DB, store fakeObjectStore, mappings map[string]inginfra.ColumnMapping) *ingapp.ImportDistributorCatalogUseCase {
 	return ingapp.NewImportDistributorCatalogUseCase(
 		store,
 		inginfra.NewMappingParserResolver(mappings),
+		inginfra.NewDistributorResolver(db),
 		inginfra.NewFacilityResolver(db),
 		database.NewTransactor(db),
 		inginfra.NewIngestionRunRepository(db),
@@ -106,20 +109,20 @@ func newImportUseCase(db *gorm.DB, store fakeObjectStore, mappings map[uuid.UUID
 func TestImportDistributorCatalog(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	distributorID, _ := setupDistributorAndFacility(t, db)
+	distributorCode, distributorID, _ := setupDistributorAndFacility(t, db)
 	productRepo := distinfra.NewDistributorProductRepository(db)
 
-	key := fmt.Sprintf("catalogs/%s/master.csv", distributorID)
+	key := fmt.Sprintf("catalogs/%s/master.csv", distributorCode)
 	store := fakeObjectStore{
 		key: []byte("コード,商品名,メーカー,JAN,単価,廃盤\n" +
 			"D-0001,抗生剤 100mg,サンプル製薬,4900000000001,\"1,200\",0\n" +
 			"D-0002,単価非公表の商品,サンプル製薬,,,0\n"),
 	}
-	mappings := map[uuid.UUID]inginfra.ColumnMapping{uuid.UUID(distributorID): standardMapping()}
+	mappings := map[string]inginfra.ColumnMapping{distributorCode: standardMapping()}
 	importCatalog := newImportUseCase(db, store, mappings)
 
 	// 1回目: 2件が新規登録される
-	result, err := importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorID: distributorID, S3Key: key, ETag: "etag-1"})
+	result, err := importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -146,7 +149,7 @@ func TestImportDistributorCatalog(t *testing.T) {
 	}
 
 	// 2回目: 同じキー・同じETagなら取り込み済みとしてスキップする
-	result, err = importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorID: distributorID, S3Key: key, ETag: "etag-1"})
+	result, err = importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +161,7 @@ func TestImportDistributorCatalog(t *testing.T) {
 	store[key] = []byte("コード,商品名,メーカー,JAN,単価,廃盤\n" +
 		"D-0001,抗生剤 100mg（改定）,サンプル製薬,4900000000001,1350,0\n" +
 		"D-0002,単価非公表の商品,サンプル製薬,,,1\n")
-	result, err = importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorID: distributorID, S3Key: key, ETag: "etag-2"})
+	result, err = importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-2"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -185,15 +188,15 @@ func TestImportDistributorCatalog(t *testing.T) {
 func TestImportDistributorCatalogWithFacilityPrices(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	distributorID, facilityID := setupDistributorAndFacility(t, db)
+	distributorCode, distributorID, facilityID := setupDistributorAndFacility(t, db)
 
-	key := fmt.Sprintf("catalogs/%s/prices.csv", distributorID)
+	key := fmt.Sprintf("catalogs/%s/prices.csv", distributorCode)
 	store := fakeObjectStore{
 		key: []byte("コード,商品名,医院コード,単価\n" +
 			fmt.Sprintf("D-1001,医院別単価の商品,%s,880\n", facilityID)),
 	}
-	mappings := map[uuid.UUID]inginfra.ColumnMapping{
-		uuid.UUID(distributorID): {
+	mappings := map[string]inginfra.ColumnMapping{
+		distributorCode: {
 			HasHeader:         true,
 			DefaultVendorName: "サンプル製薬",
 			Columns: inginfra.ColumnIndexes{
@@ -205,7 +208,7 @@ func TestImportDistributorCatalogWithFacilityPrices(t *testing.T) {
 		},
 	}
 
-	result, err := newImportUseCase(db, store, mappings).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorID: distributorID, S3Key: key, ETag: "etag-1"})
+	result, err := newImportUseCase(db, store, mappings).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -235,17 +238,17 @@ func TestImportDistributorCatalogWithFacilityPrices(t *testing.T) {
 func TestImportDistributorCatalogNeedsReview(t *testing.T) {
 	db := openTestDB(t)
 	ctx := context.Background()
-	distributorID, _ := setupDistributorAndFacility(t, db)
+	distributorCode, distributorID, _ := setupDistributorAndFacility(t, db)
 
-	key := fmt.Sprintf("catalogs/%s/broken.csv", distributorID)
+	key := fmt.Sprintf("catalogs/%s/broken.csv", distributorCode)
 	store := fakeObjectStore{
 		key: []byte("コード,商品名,メーカー,JAN,単価,廃盤\n" +
 			"D-9001,正常な行,サンプル製薬,,500,0\n" +
 			"D-9002,単価が壊れている行,サンプル製薬,,いくらでも,0\n"),
 	}
-	mappings := map[uuid.UUID]inginfra.ColumnMapping{uuid.UUID(distributorID): standardMapping()}
+	mappings := map[string]inginfra.ColumnMapping{distributorCode: standardMapping()}
 
-	result, err := newImportUseCase(db, store, mappings).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorID: distributorID, S3Key: key, ETag: "etag-1"})
+	result, err := newImportUseCase(db, store, mappings).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

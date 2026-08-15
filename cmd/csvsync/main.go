@@ -63,6 +63,7 @@ func main() {
 	importCatalog := ingapp.NewImportDistributorCatalogUseCase(
 		reader,
 		inginfra.NewMappingParserResolver(mappings),
+		inginfra.NewDistributorResolver(db),
 		inginfra.NewFacilityResolver(db),
 		database.NewTransactor(db),
 		inginfra.NewIngestionRunRepository(db),
@@ -83,15 +84,15 @@ func main() {
 		if !strings.HasSuffix(strings.ToLower(obj.Key), ".csv") {
 			continue
 		}
-		distributorID, err := ingapp.ParseCatalogKey(obj.Key)
+		distributorCode, err := ingapp.ParseCatalogKey(obj.Key)
 		if err != nil {
 			log.Printf("skip %s: %v", obj.Key, err)
 			continue
 		}
 		result, err := importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{
-			DistributorID: distributorID,
-			S3Key:         obj.Key,
-			ETag:          obj.ETag,
+			DistributorCode: distributorCode,
+			S3Key:           obj.Key,
+			ETag:            obj.ETag,
 		})
 		if err != nil {
 			log.Printf("error %s: %v", obj.Key, err)

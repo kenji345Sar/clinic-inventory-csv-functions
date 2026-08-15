@@ -19,6 +19,7 @@ import (
 type ImportDistributorCatalogUseCase struct {
 	objectStore       ObjectStore
 	parsers           ParserResolver
+	distributors      DistributorResolver
 	facilities        FacilityResolver
 	transactor        Transactor
 	runRepo           ingdomain.IngestionRunRepository
@@ -30,6 +31,7 @@ type ImportDistributorCatalogUseCase struct {
 func NewImportDistributorCatalogUseCase(
 	objectStore ObjectStore,
 	parsers ParserResolver,
+	distributors DistributorResolver,
 	facilities FacilityResolver,
 	transactor Transactor,
 	runRepo ingdomain.IngestionRunRepository,
@@ -40,6 +42,7 @@ func NewImportDistributorCatalogUseCase(
 	return &ImportDistributorCatalogUseCase{
 		objectStore:       objectStore,
 		parsers:           parsers,
+		distributors:      distributors,
 		facilities:        facilities,
 		transactor:        transactor,
 		runRepo:           runRepo,
@@ -50,9 +53,11 @@ func NewImportDistributorCatalogUseCase(
 }
 
 type ImportDistributorCatalogInput struct {
-	DistributorID shareddomain.ID
-	S3Key         string
-	ETag          string
+	// DistributorCode はS3キー(catalogs/{卸コード}/...)から取り出した卸コード。
+	// 対応する卸ID(distributors.id)はDBを引いて解決する。
+	DistributorCode string
+	S3Key           string
+	ETag            string
 }
 
 // ImportDistributorCatalogResult は取り込み1件の結果。定期実行のログ・運用確認に使う。
@@ -76,8 +81,14 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		return ImportDistributorCatalogResult{Skipped: true, Status: ingdomain.StatusApplied}, nil
 	}
 
-	// 手順2: CSV本体を取得し、その卸のパーサで中間表現に変換する。
-	parser, err := uc.parsers.Resolve(in.DistributorID)
+	// 手順2: 卸コードから卸IDを解決する。未登録のコードのフォルダに置かれたCSVは取り込まない。
+	distributorID, err := uc.distributors.Resolve(ctx, in.DistributorCode)
+	if err != nil {
+		return ImportDistributorCatalogResult{}, err
+	}
+
+	// 手順3: CSV本体を取得し、その卸のパーサで中間表現に変換する。
+	parser, err := uc.parsers.Resolve(in.DistributorCode)
 	if err != nil {
 		return ImportDistributorCatalogResult{}, err
 	}
@@ -89,11 +100,11 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 	if err != nil {
 		// ファイルとして読めない（文字コード不正・CSVとして壊れている等）。
 		// 行単位の不備ではないため、要確認として記録して終わる。
-		return uc.finishAsNeedsReview(ctx, in, nil, fmt.Sprintf("CSVを読み取れませんでした: %v", err))
+		return uc.finishAsNeedsReview(ctx, distributorID, in, fmt.Sprintf("CSVを読み取れませんでした: %v", err))
 	}
 
-	// 手順3: 中間表現をステージングに保存する（この時点ではまだ商品マスタは更新しない）。
-	run, err := ingdomain.NewIngestionRun(in.DistributorID, in.S3Key, in.ETag, uc.now())
+	// 手順4: 中間表現をステージングに保存する（この時点ではまだ商品マスタは更新しない）。
+	run, err := ingdomain.NewIngestionRun(distributorID, in.S3Key, in.ETag, uc.now())
 	if err != nil {
 		return ImportDistributorCatalogResult{}, err
 	}
@@ -118,7 +129,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		InvalidRows: len(run.InvalidRows()),
 	}
 
-	// 手順4: 読み取れない行が1行でもあれば反映しない。原因不明のまま一部だけ反映して
+	// 手順5: 読み取れない行が1行でもあれば反映しない。原因不明のまま一部だけ反映して
 	// 業務データを壊さないため（backend側のdomain-rules.md「卸連携CSV基盤」）。
 	if result.InvalidRows > 0 {
 		run.MarkNeedsReview(fmt.Sprintf("%d行が読み取れませんでした", result.InvalidRows), uc.now())
@@ -130,11 +141,11 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		return result, nil
 	}
 
-	// 手順5: ステージングの内容を卸商品マスタへ反映する。1件でも失敗したら
+	// 手順6: ステージングの内容を卸商品マスタへ反映する。1件でも失敗したら
 	// ファイル単位でロールバックし、要確認として残す。
 	created, updated, applyErr := 0, 0, error(nil)
 	err = uc.transactor.WithinTx(ctx, func(txCtx context.Context) error {
-		created, updated, applyErr = uc.apply(txCtx, in.DistributorID, run.ValidRows())
+		created, updated, applyErr = uc.apply(txCtx, distributorID, run.ValidRows())
 		return applyErr
 	})
 	if err != nil {
@@ -147,7 +158,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		return result, nil
 	}
 
-	// 手順6: 反映完了を記録する。
+	// 手順7: 反映完了を記録する。
 	run.MarkApplied(uc.now())
 	if err := uc.runRepo.Save(ctx, run); err != nil {
 		return result, err
@@ -217,8 +228,8 @@ func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributo
 }
 
 // finishAsNeedsReview はステージングに1行も入らないまま失敗したケースを記録する。
-func (uc *ImportDistributorCatalogUseCase) finishAsNeedsReview(ctx context.Context, in ImportDistributorCatalogInput, _ []CatalogRow, reason string) (ImportDistributorCatalogResult, error) {
-	run, err := ingdomain.NewIngestionRun(in.DistributorID, in.S3Key, in.ETag, uc.now())
+func (uc *ImportDistributorCatalogUseCase) finishAsNeedsReview(ctx context.Context, distributorID shareddomain.ID, in ImportDistributorCatalogInput, reason string) (ImportDistributorCatalogResult, error) {
+	run, err := ingdomain.NewIngestionRun(distributorID, in.S3Key, in.ETag, uc.now())
 	if err != nil {
 		return ImportDistributorCatalogResult{}, err
 	}

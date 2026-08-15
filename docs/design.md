@@ -16,12 +16,17 @@
 ## 1. S3キーの規約
 
 ```
-orders/{distributorId}/{facilityId}/{orderId}.csv   ← 発注CSV(clinic-inventoryが書く)
-catalogs/{distributorId}/{任意のファイル名}.csv      ← 商品マスタCSV(卸が置き、このバッチが読む)
+orders/{卸コード}/{facilityId}/{orderId}.csv   ← 発注CSV(clinic-inventoryが書く)
+catalogs/{卸コード}/{任意のファイル名}.csv      ← 商品マスタCSV(卸が置き、このバッチが読む)
 ```
 
 卸ごとにフォルダ(プレフィックス)を分けているため、**どの卸のCSVかは中身ではなく置かれた場所で決まる**。
 CSVに卸を識別する列が無くても判別でき、卸側にS3の権限を渡す場合もプレフィックス単位で分離できる。
+
+フォルダ名にはUUIDではなく**卸コード**(backendの`distributors.code`。例: `oroshi-b`)を使う。
+卸業者自身に「あなたのフォルダはここです」と案内する場面で、人が読める識別子である必要があるため。
+コードから卸ID(`distributors.id`)への変換はDBを引いて行う([distributor_resolver.go](../internal/infrastructure/distributorcsvingestion/distributor_resolver.go))。
+未登録のコードのフォルダに置かれたCSVは取り込まない(卸を登録していないのに商品だけ入る状態を防ぐ)。
 
 ---
 
@@ -63,6 +68,91 @@ S3 CSV(卸C形式) ┘    卸ごとの差はここだけ                        
 「0円」と「非公表」を区別するため、単価はポインタ(`*int`)で持つ。
 クリニック商品の仕入単価をどう決めるかは clinic-inventory 側の責務。
 
+### 3-1. パターン別に、テーブルがどうなるか
+
+#### (A) 商品ごとの単価だけを送ってくる卸
+
+CSV(`catalogs/{卸コード}/master.csv`):
+
+```csv
+コード,商品名,メーカー,JAN,単価,廃盤
+D-0001,抗生剤 100mg,サンプル製薬,4900000000001,"1,200",0
+D-0002,消炎鎮痛剤 50mg,サンプル製薬,,980,0
+```
+
+`distributor_products` … CSV 1行につき1行:
+
+| id | distributor_id | distributor_product_code | name | vendor_name | jan_code | unit_price | discontinued |
+|---|---|---|---|---|---|---|---|
+| (採番) | (卸コードから解決) | D-0001 | 抗生剤 100mg | サンプル製薬 | 4900000000001 | **1200** | false |
+| (採番) | (卸コードから解決) | D-0002 | 消炎鎮痛剤 50mg | サンプル製薬 | NULL | **980** | false |
+
+`distributor_product_facility_prices` … **行は作られない**（医院別単価が無いため）。
+
+- `id`は取り込み時に採番するUUID。CSVには存在しない。
+- `distributor_id`はCSVの中身ではなくS3キー(`catalogs/{卸コード}/`)から決まる。
+- 単価が空欄・単価列そのものが無い卸の場合、`unit_price`は**NULL**（＝非公表）になる。0とは区別する。
+
+#### (B) 医院ごとに単価を決めている卸
+
+CSV(1商品×1医院で1行になっている):
+
+```csv
+コード,商品名,医院コード,単価
+D-1001,鎮痛剤 50mg,<医院AのID>,880
+D-1001,鎮痛剤 50mg,<医院BのID>,910
+D-1002,消毒液 500ml,<医院AのID>,450
+```
+
+`distributor_products` … **商品コード単位にまとめられ、CSV 3行 → 2行**:
+
+| id | distributor_product_code | name | unit_price |
+|---|---|---|---|
+| P1(採番) | D-1001 | 鎮痛剤 50mg | **NULL** |
+| P2(採番) | D-1002 | 消毒液 500ml | **NULL** |
+
+`distributor_product_facility_prices` … 医院の数だけ行ができる:
+
+| distributor_product_id | facility_id | unit_price |
+|---|---|---|
+| P1 | 医院A | 880 |
+| P1 | 医院B | 910 |
+| P2 | 医院A | 450 |
+
+- 商品側の`unit_price`は**NULL**のまま。この卸にとって「全医院共通の定価」は存在しないため、
+  そこに何かを入れると嘘になる。単価は医院別単価テーブルだけが持つ。
+- `distributor_product_id`はCSVに無いので、商品行を登録・特定してから紐付ける
+  （新規なら採番したID、既存なら`(distributor_id, distributor_product_code)`で引いたID）。
+- CSVの「医院コード」はこちらの`facilities.id`へ変換してから保存する
+  （変換方法は7章の未決事項）。
+
+### 3-2. 2回目以降の取り込みでどうなるか
+
+どちらのパターンも**upsert**なので、同じCSVを何度流しても行は増えない。
+
+| テーブル | 突合キー | 既にある場合 |
+|---|---|---|
+| `distributor_products` | `(distributor_id, distributor_product_code)` | 商品名・ベンダー・JAN・単価・廃盤フラグを上書き |
+| `distributor_product_facility_prices` | `(distributor_product_id, facility_id)` | `unit_price`を上書き |
+
+- **CSVから消えた商品の行は削除しない**。送付漏れで既存マスタが消える事故を防ぐため。
+  廃番はCSVに廃番列がある場合のみ`discontinued`に反映する。
+- (B)の卸で、ある医院がCSVから消えた場合も医院別単価の行は残る。契約終了を単価CSVの
+  欠落から判断するのは危険なため（この扱いを変えるかは未決）。
+
+### 3-3. ステージングにはどう入るか
+
+反映の前段で`distributor_catalog_staging_rows`に入る形も、商品単位で1行になる。
+
+| パターン | staging行 | `unit_price`列 | `facility_prices`列(JSON) |
+|---|---|---|---|
+| (A) | CSV 1行につき1行 | 1200 | 空 |
+| (B) | 商品コード単位にまとめて1行 | NULL | `[{"FacilityCode":"...","UnitPrice":880},{"FacilityCode":"...","UnitPrice":910}]` |
+
+医院別単価はステージング上ではJSONのまま持ち、テーブルへの正規化は反映時に行う。
+ステージングは「反映前に人が中身を確認するための一時置き場」であり、
+ここで正規化まで行うと段を分けた意味が薄れるため。
+
 ---
 
 ## 4. 卸ごとのフォーマット差の吸収
@@ -71,9 +161,9 @@ S3 CSV(卸C形式) ┘    卸ごとの差はここだけ                        
 卸が増えるたびにコードを足す方式（実装コストが線形に増える）と、
 マッピングを画面から設定できるようにする方式（UIまで作る必要がある）の中間を採っている。
 
-定義は卸IDをキーにしたJSONファイル（`config/distributor-csv-mappings.json`、
-パスは環境変数`CATALOG_CSV_MAPPINGS`で変更可）。卸IDは実行時に採番されるUUIDのため、
-ソースに埋め込まず設定ファイルに外出しする。書式は
+定義は卸コードをキーにしたJSONファイル（`config/distributor-csv-mappings.json`、
+パスは環境変数`CATALOG_CSV_MAPPINGS`で変更可）。CSVの読み方は業務データではなく取り込み側の
+都合のため、DBではなく設定ファイルに置く。書式は
 [config/distributor-csv-mappings.example.json](../config/distributor-csv-mappings.example.json) を参照。
 
 対応している差分:
@@ -116,9 +206,9 @@ S3イベント駆動にはしない。バッチ・DBはGCP側に置く想定で�
 
 | 項目 | 現状 |
 |---|---|
-| IAM権限 | 取り込みには`catalogs/`配下への`s3:ListBucket`と`s3:GetObject`が必要。clinic-inventory側の`docs/architecture/s3-storage.md`にポリシーを記載してあるが、**AWSコンソールでの反映は未実施** |
+| IAM権限 | 付与済み(2026-08-14)。`catalogs/`配下への`s3:ListBucket`と`s3:GetObject`。ポリシーはclinic-inventory側の`docs/architecture/s3-storage.md` 3-1章 |
 | 卸側の医院コード | 現状は「医院コード = クリニックID(UUID)」として扱っている。実際の卸は自社の医院コード体系を使うため、`(卸業者, 卸側医院コード) → クリニックID`の対応表が必要。変換は[facility_resolver.go](../internal/infrastructure/distributorcsvingestion/facility_resolver.go)1か所に閉じてある |
-| 卸側の書き込み手段 | 卸に`catalogs/{distributorId}/`へのPut権限を渡すか、こちらが受領してアップロードするか。当面は後者 |
+| 卸側の書き込み手段 | 卸に`catalogs/{卸コード}/`へのPut権限を渡すか、こちらが受領してアップロードするか。当面は後者 |
 | 処理済みCSVの退避 | 実施しない（ETagで取り込み済みを判定する）。`processed/`へ移す運用にする場合は`s3:DeleteObject`の追加が必要 |
 | 反映前の差分確認 | 未実装。ステージングに中間表現が残っているため、後から足せる |
 | 受注確定CSV・売上明細CSV | 未着手 |

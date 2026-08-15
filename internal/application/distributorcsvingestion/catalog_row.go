@@ -40,10 +40,16 @@ type CatalogCsvParser interface {
 	Parse(body []byte) ([]CatalogRow, error)
 }
 
-// ParserResolver は卸IDに対応するパーサを返すポート。どの卸のCSVかはS3キーの
-// プレフィックスから決まるため、卸IDだけで解決できる。
+// ParserResolver は卸コードに対応するパーサを返すポート。どの卸のCSVかはS3キーの
+// プレフィックス(catalogs/{卸コード}/)から決まるため、卸コードだけで解決できる。
 type ParserResolver interface {
-	Resolve(distributorID shareddomain.ID) (CatalogCsvParser, error)
+	Resolve(distributorCode string) (CatalogCsvParser, error)
+}
+
+// DistributorResolver は卸コードを卸ID(distributors.id)に変換するポート。
+// コードとIDの対応はbackendのDBが持ち主のため、設定ファイルには持たずDBを引く。
+type DistributorResolver interface {
+	Resolve(ctx context.Context, distributorCode string) (shareddomain.ID, error)
 }
 
 // ObjectStore はCSV本体を取得するポート（実装はS3）。
