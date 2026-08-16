@@ -91,10 +91,12 @@ func setupDistributorAndFacility(t *testing.T, db *gorm.DB) (code string, distri
 	return distributorCode, shareddomain.ID(distributorUUID), shareddomain.ID(facilityUUID)
 }
 
-func newImportUseCase(db *gorm.DB, store fakeObjectStore, mappings map[string]inginfra.ColumnMapping) *ingapp.ImportDistributorCatalogUseCase {
+// newImportUseCase は、テスト用の卸コードに指定した卸別パーサを割り当ててユースケースを組み立てる。
+// 本番の対応表は inginfra.DefaultParsers()。
+func newImportUseCase(db *gorm.DB, store fakeObjectStore, parsers map[string]inginfra.ParseFunc) *ingapp.ImportDistributorCatalogUseCase {
 	return ingapp.NewImportDistributorCatalogUseCase(
 		store,
-		inginfra.NewMappingParserResolver(mappings),
+		inginfra.NewParserRegistry(parsers),
 		inginfra.NewDistributorResolver(db),
 		inginfra.NewFacilityResolver(db),
 		database.NewTransactor(db),
@@ -118,8 +120,8 @@ func TestImportDistributorCatalog(t *testing.T) {
 			"D-0001,抗生剤 100mg,サンプル製薬,4900000000001,\"1,200\",0\n" +
 			"D-0002,単価非公表の商品,サンプル製薬,,,0\n"),
 	}
-	mappings := map[string]inginfra.ColumnMapping{distributorCode: standardMapping()}
-	importCatalog := newImportUseCase(db, store, mappings)
+	parsers := map[string]inginfra.ParseFunc{distributorCode: inginfra.ParseSamplePharmaCatalogCSV}
+	importCatalog := newImportUseCase(db, store, parsers)
 
 	// 1回目: 2件が新規登録される
 	result, err := importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
@@ -195,20 +197,9 @@ func TestImportDistributorCatalogWithFacilityPrices(t *testing.T) {
 		key: []byte("コード,商品名,医院コード,単価\n" +
 			fmt.Sprintf("D-1001,医院別単価の商品,%s,880\n", facilityID)),
 	}
-	mappings := map[string]inginfra.ColumnMapping{
-		distributorCode: {
-			HasHeader:         true,
-			DefaultVendorName: "サンプル製薬",
-			Columns: inginfra.ColumnIndexes{
-				DistributorProductCode: col(0),
-				Name:                   col(1),
-				FacilityCode:           col(2),
-				FacilityUnitPrice:      col(3),
-			},
-		},
-	}
+	parsers := map[string]inginfra.ParseFunc{distributorCode: inginfra.ParseOroshiBCatalogCSV}
 
-	result, err := newImportUseCase(db, store, mappings).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
+	result, err := newImportUseCase(db, store, parsers).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -246,9 +237,9 @@ func TestImportDistributorCatalogNeedsReview(t *testing.T) {
 			"D-9001,正常な行,サンプル製薬,,500,0\n" +
 			"D-9002,単価が壊れている行,サンプル製薬,,いくらでも,0\n"),
 	}
-	mappings := map[string]inginfra.ColumnMapping{distributorCode: standardMapping()}
+	parsers := map[string]inginfra.ParseFunc{distributorCode: inginfra.ParseSamplePharmaCatalogCSV}
 
-	result, err := newImportUseCase(db, store, mappings).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
+	result, err := newImportUseCase(db, store, parsers).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

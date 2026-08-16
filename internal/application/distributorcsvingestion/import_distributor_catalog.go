@@ -104,6 +104,8 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 	}
 
 	// 手順4: 中間表現をステージングに保存する（この時点ではまだ商品マスタは更新しない）。
+	// 書き込み先は distributor_catalog_ingestion_runs（取り込み1回分）と
+	// distributor_catalog_staging_rows（CSV1行分。原文とエラー理由も持つ）。
 	run, err := ingdomain.NewIngestionRun(distributorID, in.S3Key, in.ETag, uc.now())
 	if err != nil {
 		return ImportDistributorCatalogResult{}, err
@@ -171,6 +173,14 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 
 // apply はステージング行を卸商品マスタ・医院別単価へupsertする。
 // 突合キーは(卸業者, 卸商品コード)で、既にあれば更新・無ければ新規登録する。
+//
+// 書き込み先は2テーブル(docs/csv-to-db-flow.md 6章)。
+//
+//	distributor_products                  … 卸商品マスタ。1商品1行
+//	distributor_product_facility_prices   … 医院別単価。医院ごとに単価が違う卸だけ行ができる
+//
+// テーブル名はgormが構造体から引くためこの層には現れない。実際の名前は
+// infrastructure/distributorcatalog/model.go の TableName() を参照。
 func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributorID shareddomain.ID, rows []ingdomain.StagingRow) (created, updated int, err error) {
 	for _, row := range rows {
 		existing, err := uc.productRepo.FindByDistributorAndCode(ctx, distributorID, row.DistributorProductCode())
@@ -189,6 +199,7 @@ func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributo
 			if row.Discontinued() {
 				product.Discontinue()
 			}
+			// distributor_products へINSERT
 			if err := uc.productRepo.Create(ctx, product); err != nil {
 				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 			}
@@ -198,6 +209,7 @@ func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributo
 			if err := product.ApplyCatalogUpdate(row.Name(), row.VendorName(), row.VendorProductCode(), row.JANCode(), row.UnitPrice(), row.Discontinued()); err != nil {
 				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 			}
+			// distributor_products をUPDATE（CSVに載る列だけ。取り込み対象外の列は触らない）
 			if err := uc.productRepo.Update(ctx, product); err != nil {
 				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 			}
@@ -205,6 +217,7 @@ func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributo
 		}
 
 		// 医院別単価。卸側の医院コードをこちらのクリニックIDに突合してから保存する。
+		// 商品ごとの単価しか送ってこない卸はここが空になり、下のテーブルには1行も入らない。
 		if len(row.FacilityPrices()) == 0 {
 			continue
 		}
@@ -220,6 +233,8 @@ func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributo
 			}
 			prices = append(prices, price)
 		}
+		// distributor_product_facility_prices へINSERT ... ON CONFLICT DO UPDATE
+		// （キーは(卸商品, クリニック)。2回目以降は行が増えず単価が上書きされる）
 		if err := uc.facilityPriceRepo.UpsertAll(ctx, prices); err != nil {
 			return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 		}

@@ -34,14 +34,18 @@ type CatalogFacilityPrice struct {
 }
 
 // CatalogCsvParser は卸ごとのCSVを中間表現へ変換するポート。
-// 実装は「列マッピング定義で動く汎用パーサ」を基本とし、構造が特殊な卸だけ専用実装を足す
-// (docs/design.md「卸ごとのフォーマット差」)。
+// 実装は卸ごとに1ファイル(infrastructure/…/catalog_<卸コード>.go)を素直に書く。
+// 列マッピング定義で動く汎用パーサ1本にはしない(docs/design.md「卸ごとのフォーマット差」)。
 type CatalogCsvParser interface {
 	Parse(body []byte) ([]CatalogRow, error)
 }
 
 // ParserResolver は卸コードに対応するパーサを返すポート。どの卸のCSVかはS3キーの
 // プレフィックス(catalogs/{卸コード}/)から決まるため、卸コードだけで解決できる。
+//
+// ここがコード中で唯一「卸によって呼び先が変わる」場所。ユースケースに
+// switch 卸コード を書くとapplication層がinfrastructureの卸別パーサをimportすることになり
+// 依存の向きが逆転するため、対応表はinfrastructure側に置いてこのポート越しに引く。
 type ParserResolver interface {
 	Resolve(distributorCode string) (CatalogCsvParser, error)
 }

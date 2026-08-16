@@ -53,8 +53,7 @@ DBを使うテストは、接続できない場合・テーブルが未作成の
 ## 実行
 
 ```bash
-cp .env.example .env                                                  # 初回のみ。値を埋める
-cp config/distributor-csv-mappings.example.json config/distributor-csv-mappings.json
+cp .env.example .env   # 初回のみ。値を埋める
 ./run.sh                                    # catalogs/ 配下を全件チェックして取り込む
 ./run.sh -prefix catalogs/<卸コード>/       # 特定の卸だけ
 ```
@@ -66,8 +65,8 @@ cp config/distributor-csv-mappings.example.json config/distributor-csv-mappings.
 
 ## 設計
 
-[docs/design.md](docs/design.md) を参照。取り込みの全体像・卸ごとのCSV形式差の吸収方法・
-単価の3パターン・失敗時の扱いをまとめている。
+- [docs/design.md](docs/design.md) … 取り込みの全体像・卸ごとのCSV形式差の吸収方法・単価の3パターン・失敗時の扱い（なぜそうしたか）
+- [docs/csv-to-db-flow.md](docs/csv-to-db-flow.md) … 卸BのCSV1本がDBに入るまでを実データで追う（何がどう動くか）
 
 ## ディレクトリ構成
 
@@ -78,6 +77,13 @@ internal/
     distributorcatalog/     反映先（卸商品・医院別単価）
     distributorcsvingestion/取り込み実行とステージング行
   application/        ユースケースとポート（中間表現の定義もここ）
-  infrastructure/     S3・DB・CSVパーサなどの実装
-config/               卸ごとのCSV読み取り定義
+  infrastructure/
+    distributorcsvingestion/
+      catalog_<卸コード>.go  卸別パーサ（1社1ファイル）
+      parser_registry.go    卸コード → パーサの対応表
+      csv_util.go           パーサ共通の部品
+    storage/ database/ …    S3・DBなどの実装
 ```
+
+新しい卸に対応するときは `catalog_<卸コード>.go` を1つ書き、`parser_registry.go` の
+`DefaultParsers()` に1行足す。中間表現より後ろ（DB反映）は全卸共通で、変更不要。

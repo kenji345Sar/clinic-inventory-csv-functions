@@ -8,8 +8,5 @@ bin/
 .env
 *.local
 
-# 卸ごとのCSVマッピング定義(実値。卸IDを含むため管理外。example をコピーして作る)
-config/distributor-csv-mappings.json
-
 # OS
 .DS_Store

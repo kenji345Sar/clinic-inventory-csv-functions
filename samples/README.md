@@ -1,11 +1,13 @@
 # 手動確認用のサンプルCSV
 
+取り込みの中身（CSVがどう変換されてDBに入るか）は[../docs/csv-to-db-flow.md](../docs/csv-to-db-flow.md)。
+
 卸から届くCSVを模したもの。S3にアップロードして取り込みを手動で確認するために使う。
 
 | ファイル | 想定する卸 | 形式 |
 |---|---|---|
-| `catalog-standard.csv` | 商品ごとの単価を公開する卸 | 商品コード・商品名・メーカー・JAN・単価・廃盤 |
-| `catalog-facility-prices.csv` | 医院ごとに扱う商品と単価が違う卸 | 商品コード・商品名・医院コード・単価（1商品×1医院で1行） |
+| `catalog-standard.csv` | サンプル医薬品卸（`sample-pharma`） | 商品コード・商品名・メーカー・JAN・単価・廃盤 |
+| `catalog-facility-prices.csv` | 卸B（`oroshi-b`） | 商品コード・商品名・医院コード・単価（1商品×1医院で1行） |
 
 ## 医院コードについて
 
@@ -79,4 +81,6 @@ aws s3api put-object \
 取り込みには`catalogs/`配下への`s3:ListBucket`と`s3:GetObject`が必要
 （clinic-inventory の `docs/architecture/s3-storage.md` 3-1章）。付与前は`AccessDenied`になる。
 
-事前に、その卸のCSV読み取り定義を `config/distributor-csv-mappings.json` に用意しておくこと。
+事前に、その卸のパーサ（`internal/infrastructure/distributorcsvingestion/catalog_<卸コード>.go`）が
+あり、`parser_registry.go` の `DefaultParsers()` に登録されていること。
+未登録の卸コードのフォルダに置いたCSVは取り込まれない。

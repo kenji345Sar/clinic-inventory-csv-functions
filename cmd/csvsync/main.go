@@ -47,11 +47,6 @@ func main() {
 		log.Fatalf("failed to connect database: %v", err)
 	}
 
-	mappings, err := inginfra.LoadMappings(env("CATALOG_CSV_MAPPINGS", "config/distributor-csv-mappings.json"))
-	if err != nil {
-		log.Fatalf("%v", err)
-	}
-
 	awsCfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		log.Fatalf("failed to load AWS config: %v", err)
@@ -62,7 +57,7 @@ func main() {
 
 	importCatalog := ingapp.NewImportDistributorCatalogUseCase(
 		reader,
-		inginfra.NewMappingParserResolver(mappings),
+		inginfra.DefaultParsers(),
 		inginfra.NewDistributorResolver(db),
 		inginfra.NewFacilityResolver(db),
 		database.NewTransactor(db),
