@@ -67,6 +67,9 @@ cp .env.example .env   # 初回のみ。値を埋める
 
 - [docs/design.md](docs/design.md) … 取り込みの全体像・卸ごとのCSV形式差の吸収方法・単価の3パターン・失敗時の扱い（なぜそうしたか）
 - [docs/csv-to-db-flow.md](docs/csv-to-db-flow.md) … 卸BのCSV1本がDBに入るまでを実データで追う（何がどう動くか）
+- [docs/distributor-catalog-import.md](docs/distributor-catalog-import.md) … 反映される側（clinic-inventoryのbackend）の設計。単価をどう表現するか
+- [docs/order-acknowledgement-import.md](docs/order-acknowledgement-import.md) … 受注確定CSVの受け皿（未実装）の論点
+- [docs/s3-storage.md](docs/s3-storage.md) … S3バケット・IAMユーザーの設定と運用手順
 
 ## ディレクトリ構成
 

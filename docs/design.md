@@ -3,15 +3,14 @@
 卸業者から届く商品マスタCSVをS3経由で受け取り、clinic-inventory のDBへ反映するまでの設計。
 決まっていない点は「未決」と明記する。
 
-反映先のテーブル定義・商品マスタ側の業務ルールは clinic-inventory 側のドキュメントを参照。
-
-- `docs/architecture/domain-rules.md`「卸連携CSV基盤」… 3種類のCSVと失敗時の扱い
-- `docs/architecture/distributor-catalog-import.md` … 商品マスタ側から見た取り込み（単価の持ち方）
-- `docs/architecture/database-schema.md` … 反映先テーブルの定義
+- [distributor-catalog-import.md](distributor-catalog-import.md) … 反映される側（clinic-inventoryのbackend）の設計。単価の持ち方
+- [s3-storage.md](s3-storage.md) … S3バケット・IAMの設定と運用
+- 反映先テーブルの定義と業務ルールは clinic-inventory 側の `docs/architecture/database-schema.md` /
+  `docs/architecture/domain-rules.md`「卸連携CSV基盤」
 
 1本のCSVが実際にどう変換されてDBに入るかを順に追いたい場合は[csv-to-db-flow.md](csv-to-db-flow.md)。
 
-最終更新: 2026-08-15
+最終更新: 2026-08-29
 
 ---
 
@@ -199,6 +198,17 @@ D-1002,消毒液 500ml,<医院AのID>,450
 | 廃番の表し方 | 失敗時の「要確認」記録 |
 | 1商品が何行になるか（まとめる必要があるか） | 冪等性の判定 |
 
+### 列が無い項目をどう埋めるか
+
+卸によっては列そのものが無い項目がある。中間表現では空を許し、反映時の埋め方を項目ごとに決めている。
+
+| 項目 | 埋め方 |
+|---|---|
+| ベンダー（メーカー）名 | 卸商品の必須項目のため、パーサ側の設定`defaultVendorName`で補う |
+| JANコード | 任意項目。空のまま取り込む（クリニック側のバーコード消費はJANのある商品でのみ効く） |
+| ベンダー商品コード | 任意項目。空のまま取り込む |
+| 単価 | 空のまま取り込む（`unit_price`はNULL）。3章参照 |
+
 ---
 
 ## 5. 冪等性と失敗時の扱い
@@ -215,6 +225,19 @@ D-1002,消毒液 500ml,<医院AのID>,450
 - **パースは行単位で継続、反映はファイル単位のトランザクション**。1行の不備で全体が見えなくなるのを避けつつ、
   1件でもエラーがあればロールバックして要確認で止める（中途半端な更新を残さない）。
 - **失敗時は自動リトライしない**。要確認として記録し、生データはS3に残して人手対応に委ねる。
+
+### 取り込み結果の見方
+
+1回分の記録は`distributor_catalog_ingestion_runs`、正規化後の行は`distributor_catalog_staging_rows`に残る
+（テーブル定義はclinic-inventory側の`docs/architecture/database-schema.md`）。
+
+| `status` | 意味 |
+|---|---|
+| `applied` | 反映済み |
+| `staged` | 中間表現までは作られたが反映前 |
+| `needs_review` | 要確認。反映されていない。`message`に理由、ステージング行に原文とエラー内容が残る |
+
+要確認になったものは自動リトライしないため、原因を直したうえでCSVを置き直す（ETagが変わるので再取り込みされる）。
 
 ---
 
@@ -234,7 +257,7 @@ S3イベント駆動にはしない。バッチ・DBはGCP側に置く想定で�
 
 | 項目 | 現状 |
 |---|---|
-| IAM権限 | 付与済み(2026-08-14)。`catalogs/`配下への`s3:ListBucket`と`s3:GetObject`。ポリシーはclinic-inventory側の`docs/architecture/s3-storage.md` 3-1章 |
+| IAM権限 | 付与済み(2026-08-14)。`catalogs/`配下への`s3:ListBucket`と`s3:GetObject`。ポリシーは[s3-storage.md](s3-storage.md) 3-1章 |
 | 卸側の医院コード | 現状は「医院コード = クリニックID(UUID)」として扱っている。実際の卸は自社の医院コード体系を使うため、`(卸業者, 卸側医院コード) → クリニックID`の対応表が必要。変換は[facility_resolver.go](../internal/infrastructure/distributorcsvingestion/facility_resolver.go)1か所に閉じてある |
 | 卸側の書き込み手段 | 卸に`catalogs/{卸コード}/`へのPut権限を渡すか、こちらが受領してアップロードするか。当面は後者 |
 | 処理済みCSVの退避 | 実施しない（ETagで取り込み済みを判定する）。`processed/`へ移す運用にする場合は`s3:DeleteObject`の追加が必要 |
