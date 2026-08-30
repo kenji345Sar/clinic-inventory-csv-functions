@@ -7,6 +7,7 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	ingapp "clinic-inventory-csv-functions/internal/application/distributorcsvingestion"
 
@@ -122,17 +123,64 @@ func isEmptyRecord(fields []string) bool {
 }
 
 // decode は文字コードをUTF-8に揃える。国内の卸CSVはShift_JIS(CP932)が多い。
+//
+// 変換できないバイトがあっても、x/textのデコーダはエラーを返さず置換文字(U+FFFD)に
+// 差し替えて先へ進める。そのまま通すと「取り込みは成功したが商品名が文字化けしている」
+// 行が誰にも気づかれずDBに入るため、化けを検出した時点でファイルごと止める。
+// 原因の大半は、卸が申告した文字コードと実際に届いたCSVの中身の食い違い。
 func decode(body []byte, encoding string) ([]byte, error) {
 	switch strings.ToLower(strings.TrimSpace(encoding)) {
 	case "", encodingUTF8, "utf-8":
-		return bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF}), nil // BOMを除去
+		decoded := bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF}) // BOMを除去
+		if i := invalidUTF8Index(decoded); i >= 0 {
+			return nil, fmt.Errorf("%d行目にUTF-8として読めないバイトがあります（CSVが実際にはShift_JISの可能性があります）", lineNo(decoded, i))
+		}
+		return decoded, nil
 	case encodingShiftJIS, "sjis", "cp932", "windows-31j":
+		// UTF-8のCSVをShift_JISとして読むと、多くは置換文字にならず「蝠�刀蜷�」のような
+		// 妥当な漢字に化けるため、下の置換文字チェックだけでは素通りする。
+		// 日本語のShift_JISがファイル全体で妥当なUTF-8にもなることは実質ないので、
+		// UTF-8として読めてしまう時点で申告と中身が食い違っていると判断する。
+		if hasNonASCII(body) && utf8.Valid(body) {
+			return nil, fmt.Errorf("Shift_JISと指定されていますが中身はUTF-8として読めます（卸から届いたCSVの文字コードが申告と違う可能性があります）")
+		}
 		decoded, _, err := transform.Bytes(japanese.ShiftJIS.NewDecoder(), body)
 		if err != nil {
 			return nil, fmt.Errorf("Shift_JISとして読み取れませんでした: %w", err)
+		}
+		if i := bytes.IndexRune(decoded, utf8.RuneError); i >= 0 {
+			return nil, fmt.Errorf("%d行目にShift_JISとして解釈できない文字があります（CSVが実際にはUTF-8の可能性があります）", lineNo(decoded, i))
 		}
 		return decoded, nil
 	default:
 		return nil, fmt.Errorf("未対応の文字コードです: %s", encoding)
 	}
+}
+
+// invalidUTF8Index はUTF-8として不正な最初のバイト位置を返す。すべて正しければ-1。
+func invalidUTF8Index(b []byte) int {
+	for i := 0; i < len(b); {
+		r, size := utf8.DecodeRune(b[i:])
+		if r == utf8.RuneError && size <= 1 {
+			return i
+		}
+		i += size
+	}
+	return -1
+}
+
+// hasNonASCII は半角英数字以外のバイトを含むかを返す。
+// 全部ASCIIなら、どの文字コードで読んでも結果が同じなので判定の対象外にする。
+func hasNonASCII(b []byte) bool {
+	for _, c := range b {
+		if c >= 0x80 {
+			return true
+		}
+	}
+	return false
+}
+
+// lineNo はバイト位置が何行目か（1始まり）を返す。どこを直せばよいかを人に示すため。
+func lineNo(b []byte, index int) int {
+	return bytes.Count(b[:index], []byte("\n")) + 1
 }
