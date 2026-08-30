@@ -331,7 +331,7 @@ const (
 | 新しい卸に対応する | `catalog_<卸コード>.go` を作る ＋ [対応表](../internal/infrastructure/distributorcsvingestion/parser_registry.go#L30)に1行（4章） |
 | 卸のCSVの列構成が変わった | その卸の `catalog_*.go` の列番号定数 |
 | 文字コードがShift_JISだった | 同ファイルの `encoding` 定数（変換自体は [csv_util.go](../internal/infrastructure/distributorcsvingestion/csv_util.go#L125)） |
-| 反映先の列を増やす | backendでテーブル変更 → [model.go](../internal/infrastructure/distributorcatalog/model.go) → repository → [CatalogRow](../internal/application/distributorcsvingestion/catalog_row.go#L12) |
+| 反映先の列を増やす | backendでテーブル変更 → [model.go](../internal/infrastructure/distributorcatalog/model.go) → repository → [CatalogRow](../internal/application/distributorcsvingestion/catalog_row.go#L6) |
 | 取り込み結果・失敗理由を調べる | `distributor_catalog_ingestion_runs` / `_staging_rows`（7章） |
 | 同じCSVを取り込み直す | `ingestion_runs` の該当行とステージング行を消してから実行（7章） |
 | 実装がどこか分からない | `grep -rn "<卸コード>" --include="*.go" internal/`（4章） |

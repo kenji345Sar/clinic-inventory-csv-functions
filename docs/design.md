@@ -51,6 +51,7 @@ S3 CSV(卸C形式) ┘    卸ごとの差はここだけ                        
 - **卸が増えても後段が共通**。前段(CSV→中間表現)だけ卸ごとに足せばよい。
 
 中間表現は [internal/application/distributorcsvingestion/catalog_row.go](../internal/application/distributorcsvingestion/catalog_row.go)、
+取り込みが外部に要求する操作(ポート)は同じディレクトリの[ports.go](../internal/application/distributorcsvingestion/ports.go)、
 ステージング行は [internal/domain/distributorcsvingestion/ingestion_run.go](../internal/domain/distributorcsvingestion/ingestion_run.go)。
 ステージングにはCSVの原文(`raw`)も残し、突合に失敗した行を人が追えるようにする。
 
