@@ -5,7 +5,7 @@
 //
 // このコンテキスト自体は商品・単価という業務データを持たない。CSVを共通の中間表現に
 // 正規化してここに溜め、その内容をDistributorCatalogコンテキストの集約へ反映する
-// (docs/design.md「全体の流れ」)。
+// (docs/catalog-import-pipeline.md「全体の流れ」)。
 package distributorcsvingestion
 
 import (

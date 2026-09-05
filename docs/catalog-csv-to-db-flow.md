@@ -1,18 +1,19 @@
-# S3のCSVがDBに入るまで
+# 商品マスタCSVがDBに入るまで
 
 「S3に置かれた1本のCSVが、どのコードを通って、どのテーブルに入るのか」を実データで追うノート。
-設計の理由は[design.md](design.md)、テーブル定義は clinic-inventory 側の
+設計の理由は[catalog-import-pipeline.md](catalog-import-pipeline.md)、テーブル定義は clinic-inventory 側の
 `docs/architecture/database-schema.md` を参照。
 
 例に使うのは**卸B**（卸コード `oroshi-b`）。医院ごとに扱う商品と単価が違う卸で、いちばん変換が多い。
 
-最終更新: 2026-08-15
+最終更新: 2026-09-05
 
 ---
 
 ## 1. 卸ごとに違うのはどこか
 
-境界は**中間表現 `CatalogRow`**。ここより手前が卸ごと、ここから先は全卸まったく同じコードが動く。
+境界は**中間表現 `CatalogRow`**。ここより手前が卸ごと、ここから先は全卸まったく同じコードが動く
+（なぜ段を分けているかは[catalog-import-pipeline.md](catalog-import-pipeline.md)2章）。
 
 ```
 CSV ──[卸ごと]──▶ CatalogRow ──[全卸共通]──▶ DB
@@ -35,8 +36,8 @@ internal/domain/…                                      共通  取り込み実
 internal/infrastructure/storage, database, distributorcatalog/  共通
 ```
 
-共通側に `if 卸コード == "oroshi-b"` のような分岐は無い。卸コードが出てくるのは卸別パーサと
-対応表だけで、新しい卸に対応するときも `catalog_<卸コード>.go` を1つ書いて対応表に1行足すだけ。
+共通側に `if 卸コード == "oroshi-b"` のような分岐は無い。**卸コードが出てくるのは卸別パーサと
+対応表だけ**（新しい卸を足すときに触る場所は8章）。
 
 ---
 
@@ -54,7 +55,7 @@ B-1003,動物用消毒液 500mL,494100fc-9a7c-4d4a-a15c-7400a667fca9,910
 ```
 
 **1商品×1医院で1行**。同じ `B-1001` が2行あり、医院によって単価が違う（2,480 / 2,560）。
-メーカー名・JAN・廃番の列は無い。医院コードは `facilities.id`（[design.md 7章](design.md)の未決事項）。
+メーカー名・JAN・廃番の列は無い。医院コードは `facilities.id`（[catalog-import-pipeline.md 7章](catalog-import-pipeline.md)の未決事項）。
 
 置き場所は `s3://<bucket>/catalogs/oroshi-b/catalog-facility-prices.csv`。
 
@@ -135,12 +136,10 @@ rows, err := parser.Parse(body)                         // L99  卸Bの関数が
 なっている。ただしインターフェースが担っているのは*どの関数を呼ぶかを引くこと*だけで、
 *CSVの読み方の違いを吸収すること*ではない。読み方は卸ごとに1ファイルに素で書いてあり、
 卸Bの挙動を知るには `catalog_oroshi_b.go` を上から下まで読めばよい（列番号を設定値で渡す
-汎用パーサ1本にはしていない。理由は[design.md 4章](design.md)）。
+汎用パーサ1本にはしていない。理由は[catalog-import-pipeline.md 4章](catalog-import-pipeline.md)）。
 
 ユースケースに `switch 卸コード` と書かず対応表を引いているのは、**卸が増えたときに手順1〜7を
-編集させないため**。今の形なら、卸を足すときに触るのは `catalog_<卸コード>.go` 1ファイルと
-[対応表](../internal/infrastructure/distributorcsvingestion/parser_registry.go#L30)の1行だけで、
-ユースケースは無変更で済む。
+編集させないため**。卸を足してもユースケースは無変更で済む（触る場所は8章）。
 
 ### 呼び先はどう決まるか
 
@@ -263,8 +262,8 @@ const (
 | 3 | B-1002 | NULL | `[{"FacilityCode":"578c4442…","UnitPrice":1980}]` |
 | 4 | B-1003 | NULL | `[{"FacilityCode":"578c4442…","UnitPrice":880},{"FacilityCode":"494100fc…","UnitPrice":910}]` |
 
-医院別単価はJSONのまま持ち、テーブルへの正規化は次の反映段で行う。CSVの原文（`raw`）も
-各行に残るので、失敗した行を後から目で追える。`row_no` はCSV上の行番号（ヘッダが1行目）。
+医院別単価はJSONのまま持ち、正規化は次の反映段で行う（そうしている理由は[catalog-import-pipeline.md](catalog-import-pipeline.md)3-3）。
+CSVの原文（`raw`）も各行に残るので、失敗した行を後から目で追える。`row_no` はCSV上の行番号（ヘッダが1行目）。
 
 読み取れない行が1行でもあれば、**ここで `needs_review` にして終わる**（＝反映しない）。
 
@@ -315,9 +314,8 @@ const (
 拾ってスキップする。CSVを置き直せば内容が変わりETagも変わるので再取り込みされ、
 `(卸ID, 卸商品コード)` のupsertなので**行は増えず既存行が更新される**。
 
-ただし**以前と同じ内容に戻したCSVは再取り込みされない**（ETagが過去の実行と一致するため）。
-巻き戻したい場合は、該当する `distributor_catalog_ingestion_runs` の行とステージング行を
-消してから実行する。
+ETag判定には「以前と同じ内容に戻したCSVは再取り込みされない」という癖がある。
+その理由と巻き戻し手順は[catalog-import-pipeline.md](catalog-import-pipeline.md)5章。
 
 失敗したファイルは商品マスタを**1行も更新していない**。原因は
 `distributor_catalog_staging_rows` の `error_message` と `raw` を見る。
@@ -333,5 +331,5 @@ const (
 | 文字コードがShift_JISだった | 同ファイルの `encoding` 定数（変換自体は [csv_util.go](../internal/infrastructure/distributorcsvingestion/csv_util.go#L125)） |
 | 反映先の列を増やす | backendでテーブル変更 → [model.go](../internal/infrastructure/distributorcatalog/model.go) → repository → [CatalogRow](../internal/application/distributorcsvingestion/catalog_row.go#L6) |
 | 取り込み結果・失敗理由を調べる | `distributor_catalog_ingestion_runs` / `_staging_rows`（7章） |
-| 同じCSVを取り込み直す | `ingestion_runs` の該当行とステージング行を消してから実行（7章） |
+| 同じCSVを取り込み直す | `ingestion_runs` の該当行とステージング行を消してから実行（[catalog-import-pipeline.md](catalog-import-pipeline.md)5章） |
 | 実装がどこか分からない | `grep -rn "<卸コード>" --include="*.go" internal/`（4章） |

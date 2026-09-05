@@ -7,7 +7,7 @@ import (
 
 // CatalogKeyPrefix は卸が商品マスタCSVを置くS3キーのプレフィックス。
 // 発注CSV(orders/{卸コード}/...)と同じく卸ごとにフォルダを分けるため、
-// どの卸のCSVかはCSVの中身ではなく置かれた場所で決まる(docs/design.md「S3キーの規約」)。
+// どの卸のCSVかはCSVの中身ではなく置かれた場所で決まる(docs/catalog-import-pipeline.md「S3キーの規約」)。
 const CatalogKeyPrefix = "catalogs/"
 
 // ParseCatalogKey は catalogs/{卸コード}/{ファイル名}.csv から卸コードを取り出す。

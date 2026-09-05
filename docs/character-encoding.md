@@ -1,7 +1,7 @@
 # CSVの文字コード(UTF-8 / Shift_JIS)の扱い
 
 卸から届くCSVの文字コードをどう扱っているか、その前提となる仕組みをまとめる。
-取り込み全体の設計は[design.md](design.md)、実装は
+取り込み全体の設計は[catalog-import-pipeline.md](catalog-import-pipeline.md)、実装は
 [csv_util.go](../internal/infrastructure/distributorcsvingestion/csv_util.go)の`decode`。
 
 文字コードを他の形式差と分けて1本の文書にしているのは、**間違えても処理が止まらず、

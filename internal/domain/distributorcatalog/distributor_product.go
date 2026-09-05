@@ -19,7 +19,7 @@ import (
 // ベンダー（メーカー）名・ベンダーが割り当てている商品コード（VendorProductCode）は別途保持する。
 //
 // 標準単価（unitPrice）はnil可。単価を公表せず商品マスタだけ送ってくる卸があるため、
-// 「0円」と「非公表」を区別できるようポインタで持つ（docs/design.md「単価の3パターン」）。
+// 「0円」と「非公表」を区別できるようポインタで持つ（docs/catalog-import-pipeline.md「単価の3パターン」）。
 // 医院ごとに単価を決めている卸の単価はここではなくFacilityPriceが持つ。
 type DistributorProduct struct {
 	id                     shareddomain.ID
@@ -87,7 +87,7 @@ func (p *DistributorProduct) Discontinue() {
 }
 
 // ApplyCatalogUpdate は卸から届いた商品マスタCSVの内容を既存の卸商品に反映する
-// （docs/design.md）。卸商品コードと所属卸業者は
+// （docs/catalog-import-pipeline.md）。卸商品コードと所属卸業者は
 // 突合キーそのものなので変更しない。単価nilは「非公表」としてそのまま反映する。
 func (p *DistributorProduct) ApplyCatalogUpdate(name, vendorName, vendorProductCode, janCode string, unitPrice *int, discontinued bool) error {
 	if name == "" {

@@ -13,7 +13,7 @@ import (
 // ImportDistributorCatalogUseCase はS3上の商品マスタCSVを1件取り込む。
 //
 // 「CSVを中間表現に正規化してステージングに保存する」段と「ステージングの内容を
-// 卸商品マスタへ反映する」段を分けている(docs/design.md「全体の流れ」)。
+// 卸商品マスタへ反映する」段を分けている(docs/catalog-import-pipeline.md「全体の流れ」)。
 // 定期実行の入口(cmd/ingest)・将来のCloud Functionsのどちらからでも呼べるよう、
 // 処理の本体はここに置きmain側は配線だけにする。
 type ImportDistributorCatalogUseCase struct {
@@ -174,7 +174,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 // apply はステージング行を卸商品マスタ・医院別単価へupsertする。
 // 突合キーは(卸業者, 卸商品コード)で、既にあれば更新・無ければ新規登録する。
 //
-// 書き込み先は2テーブル(docs/csv-to-db-flow.md 6章)。
+// 書き込み先は2テーブル(docs/catalog-csv-to-db-flow.md 6章)。
 //
 //	distributor_products                  … 卸商品マスタ。1商品1行
 //	distributor_product_facility_prices   … 医院別単価。医院ごとに単価が違う卸だけ行ができる

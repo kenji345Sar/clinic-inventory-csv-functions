@@ -1,7 +1,7 @@
 package distributorcsvingestion
 
 // CatalogRow は卸から届いた商品マスタCSVの1行を、卸ごとの形式差を取り除いて
-// 正規化した中間表現(docs/design.md「全体の流れ」)。
+// 正規化した中間表現(docs/catalog-import-pipeline.md「全体の流れ」)。
 // 卸別のパーサはこの形に変換するところまでを担当し、以降の反映処理は全卸で共通になる。
 type CatalogRow struct {
 	RowNo                  int    // CSV上の行番号（1始まり）

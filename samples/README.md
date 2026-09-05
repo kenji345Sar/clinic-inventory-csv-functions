@@ -1,6 +1,6 @@
 # 手動確認用のサンプルCSV
 
-取り込みの中身（CSVがどう変換されてDBに入るか）は[../docs/csv-to-db-flow.md](../docs/csv-to-db-flow.md)。
+取り込みの中身（CSVがどう変換されてDBに入るか）は[../docs/catalog-csv-to-db-flow.md](../docs/catalog-csv-to-db-flow.md)。
 
 卸から届くCSVを模したもの。S3にアップロードして取り込みを手動で確認するために使う。
 
@@ -12,7 +12,7 @@
 ## 医院コードについて
 
 `catalog-facility-prices.csv` の医院コード列には、**ローカルDBの`facilities.id`(UUID)** を入れてある。
-現状は「医院コード = クリニックID」として突合しているため（docs/design.md 7章の未決事項）。
+現状は「医院コード = クリニックID」として突合しているため（docs/catalog-import-pipeline.md 7章の未決事項）。
 実際の卸は自社の医院コードを使うので、対応表を入れる段階でこのサンプルも書き換える。
 
 ## ローカルDBの対応表（UUID → 名前）

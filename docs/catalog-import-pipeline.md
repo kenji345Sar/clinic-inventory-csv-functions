@@ -1,32 +1,29 @@
-# 商品マスタCSV取り込みの設計
+# 商品マスタCSV取り込みパイプラインの設計
 
-卸業者から届く商品マスタCSVをS3経由で受け取り、clinic-inventory のDBへ反映するまでの設計。
-決まっていない点は「未決」と明記する。
+卸業者から届く商品マスタCSVをS3経由で受け取り、clinic-inventory のDBへ反映するまでの、
+**このリポジトリが行う処理**の設計。決まっていない点は「未決」と明記する。
 
-- [distributor-catalog-import.md](distributor-catalog-import.md) … 反映される側（clinic-inventoryのbackend）の設計。単価の持ち方
+- [catalog-import-backend.md](catalog-import-backend.md) … 対になる文書。**反映先**のclinic-inventory(backend)が、受け皿のテーブルとドメインをどう用意しているか
 - [s3-storage.md](s3-storage.md) … S3バケット・IAMの設定と運用
 - 反映先テーブルの定義と業務ルールは clinic-inventory 側の `docs/architecture/database-schema.md` /
   `docs/architecture/domain-rules.md`「卸連携CSV基盤」
 
-1本のCSVが実際にどう変換されてDBに入るかを順に追いたい場合は[csv-to-db-flow.md](csv-to-db-flow.md)。
+1本のCSVが実際にどう変換されてDBに入るかを順に追いたい場合は[catalog-csv-to-db-flow.md](catalog-csv-to-db-flow.md)。
 
-最終更新: 2026-08-29
+最終更新: 2026-09-05
 
 ---
 
 ## 1. S3キーの規約
 
-```
-orders/{卸コード}/{facilityId}/{orderId}.csv   ← 発注CSV(clinic-inventoryが書く)
-catalogs/{卸コード}/{任意のファイル名}.csv      ← 商品マスタCSV(卸が置き、このバッチが読む)
-```
+このバッチが読むのは `catalogs/{卸コード}/{任意のファイル名}.csv`
+(バケット全体のキー規約と、フォルダ名に卸コードを使う理由は[s3-storage.md](s3-storage.md)3章)。
 
-卸ごとにフォルダ(プレフィックス)を分けているため、**どの卸のCSVかは中身ではなく置かれた場所で決まる**。
-CSVに卸を識別する列が無くても判別でき、卸側にS3の権限を渡す場合もプレフィックス単位で分離できる。
+卸ごとにフォルダ(プレフィックス)が分かれているため、**どの卸のCSVかは中身ではなく置かれた場所で決まる**。
+CSVに卸を識別する列が無くても判別できる。
 
-フォルダ名にはUUIDではなく**卸コード**(backendの`distributors.code`。例: `oroshi-b`)を使う。
-卸業者自身に「あなたのフォルダはここです」と案内する場面で、人が読める識別子である必要があるため。
-コードから卸ID(`distributors.id`)への変換はDBを引いて行う([distributor_resolver.go](../internal/infrastructure/distributorcsvingestion/distributor_resolver.go))。
+卸コード(backendの`distributors.code`。例: `oroshi-b`)から卸ID(`distributors.id`)への変換は
+DBを引いて行う([distributor_resolver.go](../internal/infrastructure/distributorcsvingestion/distributor_resolver.go))。
 未登録のコードのフォルダに置かれたCSVは取り込まない(卸を登録していないのに商品だけ入る状態を防ぐ)。
 
 ---
@@ -54,6 +51,8 @@ S3 CSV(卸C形式) ┘    卸ごとの差はここだけ                        
 取り込みが外部に要求する操作(ポート)は同じディレクトリの[ports.go](../internal/application/distributorcsvingestion/ports.go)、
 ステージング行は [internal/domain/distributorcsvingestion/ingestion_run.go](../internal/domain/distributorcsvingestion/ingestion_run.go)。
 ステージングにはCSVの原文(`raw`)も残し、突合に失敗した行を人が追えるようにする。
+
+どのファイルが「卸ごと」で、どこから先が「全卸共通」かは[catalog-csv-to-db-flow.md](catalog-csv-to-db-flow.md)1章に一覧がある。
 
 ---
 
@@ -123,10 +122,10 @@ D-1002,消毒液 500ml,<医院AのID>,450
 
 - 商品側の`unit_price`は**NULL**のまま。この卸にとって「全医院共通の定価」は存在しないため、
   そこに何かを入れると嘘になる。単価は医院別単価テーブルだけが持つ。
-- `distributor_product_id`はCSVに無いので、商品行を登録・特定してから紐付ける
-  （新規なら採番したID、既存なら`(distributor_id, distributor_product_code)`で引いたID）。
 - CSVの「医院コード」はこちらの`facilities.id`へ変換してから保存する
   （変換方法は7章の未決事項）。
+
+このCSVがどのコードを通ってこの2つのテーブルに入るかは[catalog-csv-to-db-flow.md](catalog-csv-to-db-flow.md)で実データを追える。
 
 ### 3-2. 2回目以降の取り込みでどうなるか
 
@@ -137,10 +136,9 @@ D-1002,消毒液 500ml,<医院AのID>,450
 | `distributor_products` | `(distributor_id, distributor_product_code)` | 商品名・ベンダー・JAN・単価・廃盤フラグを上書き |
 | `distributor_product_facility_prices` | `(distributor_product_id, facility_id)` | `unit_price`を上書き |
 
-- **CSVから消えた商品の行は削除しない**。送付漏れで既存マスタが消える事故を防ぐため。
-  廃番はCSVに廃番列がある場合のみ`discontinued`に反映する。
-- (B)の卸で、ある医院がCSVから消えた場合も医院別単価の行は残る。契約終了を単価CSVの
-  欠落から判断するのは危険なため（この扱いを変えるかは未決）。
+**CSVから消えた行は、商品も医院別単価も削除しない**（理由と廃番の扱いは5章）。(B)の卸で、
+ある医院がCSVから消えた場合も医院別単価の行は残る。契約終了を単価CSVの欠落から判断するのは
+危険なため（この扱いを変えるかは未決）。
 
 ### 3-3. ステージングにはどう入るか
 
@@ -169,7 +167,7 @@ D-1002,消毒液 500ml,<医院AのID>,450
 
 卸コードとパーサの対応表は
 [parser_registry.go](../internal/infrastructure/distributorcsvingestion/parser_registry.go) の
-`DefaultParsers()`。新しい卸に対応するときは `catalog_<卸コード>.go` を書いて、この表に1行足す。
+`DefaultParsers()`。新しい卸を足すときに触る場所は[catalog-csv-to-db-flow.md](catalog-csv-to-db-flow.md)8章。
 
 ### なぜ「設定ファイルで列番号を渡す汎用パーサ1本」をやめたか
 
@@ -199,24 +197,20 @@ D-1002,消毒液 500ml,<医院AのID>,450
 | 廃番の表し方 | 失敗時の「要確認」記録 |
 | 1商品が何行になるか（まとめる必要があるか） | 冪等性の判定 |
 
+卸ごとの実際の設定値（どの卸がどの文字コードで、単価をどう持つか）は
+[catalog-csv-to-db-flow.md](catalog-csv-to-db-flow.md)4章の一覧表。
+
 ### 文字コードをどう扱うか
 
 卸ごとに文字コードが違う（UTF-8 / Shift_JIS）。**自動判別はせず、卸との取り決めを
 卸別パーサの先頭に定数で書き**、`readRecords`に渡す。判別は短いCSVで外すうえ、
 取り決めは一度決まれば変わらないため。
 
-| 卸 | 文字コード |
-|---|---|
-| 卸A | Shift_JIS |
-| 卸B | UTF-8 |
-| サンプル製薬 | UTF-8 |
-
 **申告と違う文字コードのCSVが届いた場合は、変換の時点で検出してファイル単位で止める。**
 デコーダは変換できない文字をエラーにせず置換文字に差し替えて進むため、素通しすると
-商品名が化けたまま取り込みが成功してしまう。行単位ではなくファイル単位にするのは、
-食い違いがファイル全体に及び、1行だけ直しても意味がないから。
+商品名が化けたまま取り込みが成功してしまう。
 
-BOMの正体・そもそも文字コードを判定できない理由・食い違いを検出する仕組みは
+そもそも文字コードを判定できない理由・BOMの正体・食い違いを検出する仕組みは
 [character-encoding.md](character-encoding.md)にまとめてある。
 
 ---
@@ -247,9 +241,7 @@ BOMの正体・そもそも文字コードを判定できない理由・食い�
   CSVに廃番列がある場合のみ反映する。
 - **パースは行単位で継続、反映はファイル単位のトランザクション**。1行の不備で全体が見えなくなるのを避けつつ、
   1件でもエラーがあればロールバックして要確認で止める（中途半端な更新を残さない）。
-- **文字コードの食い違いはファイル単位で止める**。申告と違う文字コードのCSVが届くと、
-  エラーにならないまま商品名が化けて取り込まれるため、変換の時点で検出して要確認にする
-  （4章「文字コードをどう扱うか」）。
+- **文字コードの食い違いはファイル単位で止める**（4章「文字コードをどう扱うか」）。
 - **失敗時は自動リトライしない**。要確認として記録し、生データはS3に残して人手対応に委ねる。
 
 ### 取り込み結果の見方
@@ -276,6 +268,7 @@ S3イベント駆動にはしない。バッチ・DBはGCP側に置く想定で�
 - 将来: 同じユースケースをCloud Functionsに載せ、Cloud Schedulerから定刻起動
 
 処理本体はユースケース層にあり、`cmd/csvsync`は配線だけなので、関数エントリポイントを足せば載せ替えられる。
+実行コマンドと出力の見方は[README](../README.md)。
 
 ---
 

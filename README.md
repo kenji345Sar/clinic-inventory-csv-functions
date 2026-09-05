@@ -34,7 +34,8 @@ DBは同じものを共有する。**テーブルの所有者はbackendのみ**�
 `internal/infrastructure/*/model.go` の対応する構造体も合わせて更新する。
 
 反映先の集約（`DistributorProduct` / `FacilityPrice`）はbackendにも同じものがあり、
-業務ルール（必須項目・単価の扱い・廃盤）は揃える必要がある。
+業務ルール（必須項目・単価の扱い・廃盤）は揃える必要がある（分けた理由とこのトレードオフの経緯は
+[docs/catalog-import-backend.md](docs/catalog-import-backend.md)）。
 
 ## ビルド・テスト
 
@@ -65,10 +66,10 @@ cp .env.example .env   # 初回のみ。値を埋める
 
 ## 設計
 
-- [docs/design.md](docs/design.md) … 取り込みの全体像・卸ごとのCSV形式差の吸収方法・単価の3パターン・失敗時の扱い（なぜそうしたか）
-- [docs/csv-to-db-flow.md](docs/csv-to-db-flow.md) … 卸BのCSV1本がDBに入るまでを実データで追う（何がどう動くか）
+- [docs/catalog-import-pipeline.md](docs/catalog-import-pipeline.md) … **取り込む側**の設計。全体像・卸ごとのCSV形式差の吸収方法・単価の3パターン・失敗時の扱い（なぜそうしたか）
+- [docs/catalog-csv-to-db-flow.md](docs/catalog-csv-to-db-flow.md) … 卸BのCSV1本がDBに入るまでを実データで追う（何がどう動くか）
 - [docs/character-encoding.md](docs/character-encoding.md) … CSVの文字コード(UTF-8 / Shift_JIS)の扱いと、その前提になる仕組み
-- [docs/distributor-catalog-import.md](docs/distributor-catalog-import.md) … 反映される側（clinic-inventoryのbackend）の設計。単価をどう表現するか
+- [docs/catalog-import-backend.md](docs/catalog-import-backend.md) … **反映先**（clinic-inventoryのbackend）の設計。受け皿のスキーマとドメインで単価をどう表現するか
 - [docs/order-acknowledgement-import.md](docs/order-acknowledgement-import.md) … 受注確定CSVの受け皿（未実装）の論点
 - [docs/s3-storage.md](docs/s3-storage.md) … S3バケット・IAMユーザーの設定と運用手順
 
@@ -89,5 +90,5 @@ internal/
     storage/ database/ …    S3・DBなどの実装
 ```
 
-新しい卸に対応するときは `catalog_<卸コード>.go` を1つ書き、`parser_registry.go` の
-`DefaultParsers()` に1行足す。中間表現より後ろ（DB反映）は全卸共通で、変更不要。
+「新しい卸に対応する」「CSVの列構成が変わった」といった**やりたいこと別の触る場所**は
+[docs/catalog-csv-to-db-flow.md](docs/catalog-csv-to-db-flow.md) 8章にまとめてある。

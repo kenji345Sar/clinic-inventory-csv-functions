@@ -69,7 +69,7 @@ catalogs/{卸コード}/{任意のファイル名}.csv      ← 商品マスタC
 
 卸業者ごとにフォルダ(プレフィックス)を分けている。将来、卸業者側にS3への読み取り権限を渡す場合は、このプレフィックス単位でIAMポリシーを分ければ「自社宛のフォルダしか見えない」テナント分離ができる(現時点では卸側へのアクセス権限はまだ設定していない)。
 
-商品マスタCSVも同じ規約にしているため、**どの卸のCSVかは中身ではなく置かれた場所で決まる**。商品マスタ側から見た設計は[distributor-catalog-import.md](distributor-catalog-import.md)、取り込み処理そのものは[design.md](design.md)を参照。
+商品マスタCSVも同じ規約にしているため、**どの卸のCSVかは中身ではなく置かれた場所で決まる**。反映先(backend)側の設計は[catalog-import-backend.md](catalog-import-backend.md)、取り込み処理そのものは[catalog-import-pipeline.md](catalog-import-pipeline.md)を参照。
 
 ---
 

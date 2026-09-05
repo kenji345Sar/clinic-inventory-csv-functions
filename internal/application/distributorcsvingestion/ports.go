@@ -12,7 +12,7 @@ import (
 
 // CatalogCsvParser は卸ごとのCSVを中間表現へ変換するポート。
 // 実装は卸ごとに1ファイル(infrastructure/…/catalog_<卸コード>.go)を素直に書く。
-// 列マッピング定義で動く汎用パーサ1本にはしない(docs/design.md「卸ごとのフォーマット差」)。
+// 列マッピング定義で動く汎用パーサ1本にはしない(docs/catalog-import-pipeline.md「卸ごとのフォーマット差」)。
 type CatalogCsvParser interface {
 	Parse(body []byte) ([]CatalogRow, error)
 }

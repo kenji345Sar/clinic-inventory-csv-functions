@@ -1,16 +1,17 @@
-# 卸業者の商品マスタCSV取り込み(商品マスタ側から見た設計)
+# 商品マスタCSV取り込み・反映先(backend)側の設計
 
-複数の卸業者から送付される商品マスタCSVをS3経由で受け取り、`distributor_products`に反映する仕組みについて、
-**backend側が持つ責務**をまとめる。
+商品マスタCSVを`distributor_products`に反映する仕組みのうち、**受け取る側である
+clinic-inventory(backend)が持つ責務**をまとめる。取り込む処理はこちらに無く、
+受け皿のテーブル・ドメイン・画面表示をどう用意しているかだけを扱う。
 
-> このドキュメントは**反映される側(clinic-inventoryのbackend)の設計**を扱う。
-> パイプラインそのもの(S3キーの読み取り・卸ごとのフォーマット差の吸収・冪等性・起動方法)は[design.md](design.md)。
+> 対になる文書は[catalog-import-pipeline.md](catalog-import-pipeline.md)。
+> **取り込む側**(S3キーの読み取り・卸ごとのフォーマット差の吸収・冪等性・起動方法)はそちら。
 
 - 位置づけ: `docs/architecture/domain-rules.md`(clinic-inventory側)の3種類のCSVのうち「商品マスタ・価格表CSV」
 - S3バケット・IAMの実設定は[s3-storage.md](s3-storage.md)
 - 別種のCSV: 受注確定CSV(卸の引き当て結果・納入単価)の受け皿は未実装。論点は[order-acknowledgement-import.md](order-acknowledgement-import.md)
 
-最終更新: 2026-08-29
+最終更新: 2026-09-05
 
 ---
 
@@ -22,13 +23,7 @@
 
 分けたうえで、**テーブルの作成・変更(マイグレーション)はbackendだけが行う**。取り込み側は
 マイグレーションを持たず、既にあるテーブルへ読み書きするだけにしている。スキーマの所有者を
-1つに保つため。
-
-| | backend(このリポジトリ) | clinic-inventory-csv-functions |
-|---|---|---|
-| テーブルの作成・変更 | **行う**(`cmd/api/main.go`のAutoMigrate) | 行わない |
-| 画面・APIからの参照/更新 | 行う | 行わない |
-| S3からのCSV取り込みと反映 | 行わない | **行う** |
+1つに保つため。どちらがどこまでを受け持つかの一覧は[README](../README.md)「clinic-inventory との関係」。
 
 ---
 
@@ -36,21 +31,14 @@
 
 **卸業者ごとに、送ってくる項目も粒度もバラバラ**である、というのがこのコンテキストの前提。
 1社の形に合わせてモデルを作ると他社で破綻するため、「無い」ことを許容できる受け皿にしてある。
-中でも影響が大きいのが単価で、backend側は3パターンすべてを表現できるスキーマとドメインを持つ。
+中でも影響が大きいのが単価で、backend側は3パターン(商品ごと / 医院ごと / 非公表)すべてを
+表現できるスキーマとドメインを持つ。パターンの一覧と、それぞれで実際に行がどう作られるかは
+[catalog-import-pipeline.md](catalog-import-pipeline.md)「3. 単価の3パターン」。
 
-JANコード・ベンダー名のように「列が無い卸がある」項目をどう埋めるかは取り込み側の責務。
-[design.md](design.md)「4. 卸ごとのフォーマット差の吸収」を参照。
+JANコード・ベンダー名のように「列が無い卸がある」項目をどう埋めるかも取り込み側の責務。
+[catalog-import-pipeline.md](catalog-import-pipeline.md)「4. 卸ごとのフォーマット差の吸収」を参照。
 
-### 単価の3パターン
-
-| 卸のパターン | 保存先 |
-|---|---|
-| 商品ごとの単価のみ公開 | `distributor_products.unit_price` |
-| 医院ごとに単価を決めている | `distributor_product_facility_prices`(医院別単価)。商品側の`unit_price`はNULLのまま |
-| 単価を公表していない | どちらにも入れない(`unit_price`はNULL) |
-
-パターンごとに実際の行がどう作られるか(CSVの例と対応表)は
-[design.md](design.md)「3-1. パターン別に、テーブルがどうなるか」を参照。
+### backend側が引き受けていること
 
 - `unit_price`は**NULL許容**。「0円」と「非公表」を区別するため、ドメイン側も`*int`で持つ
   (`backend/internal/domain/distributorcatalog/distributor_product.go`(clinic-inventory側))。
@@ -78,7 +66,7 @@ JANコード・ベンダー名のように「列が無い卸がある」項目�
 | 役割 | 場所 |
 |---|---|
 | 反映先テーブルの定義 | `backend/internal/infrastructure/distributorcatalog/model.go`(clinic-inventory側) |
-| 取り込み用テーブル(履歴・ステージング)の定義 | `backend/internal/infrastructure/distributorcsvingestion/model.go`(clinic-inventory側) — 定義のみ。読み書きと`status`の意味は[design.md](design.md)5章 |
+| 取り込み用テーブル(履歴・ステージング)の定義 | `backend/internal/infrastructure/distributorcsvingestion/model.go`(clinic-inventory側) — 定義のみ。読み書きと`status`の意味は[catalog-import-pipeline.md](catalog-import-pipeline.md)5章 |
 | テーブル作成 | `backend/cmd/api/main.go`(clinic-inventory側)のAutoMigrate |
 | 卸商品・医院別単価の参照 | 各リポジトリ。医院別単価は参照のみ(登録・更新は取り込み側) |
 
@@ -90,7 +78,7 @@ JANコード・ベンダー名のように「列が無い卸がある」項目�
 
 ## 4. 未決(backend側の判断が要るもの)
 
-S3権限・卸側の医院コード体系・処理済みCSVの退避など取り込み側の未決は[design.md](design.md)7章にある。
+S3権限・卸側の医院コード体系・処理済みCSVの退避など取り込み側の未決は[catalog-import-pipeline.md](catalog-import-pipeline.md)7章にある。
 
 | 項目 | 現状 |
 |---|---|

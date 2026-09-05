@@ -5,11 +5,11 @@
 
 > **未実装。** 反映先の列もドメインのフィールドも存在せず、取り込み処理も未着手
 > (取り込み側リポジトリ clinic-inventory-csv-functions の
-> `docs/design.md`で「受注確定CSV・売上明細CSV | 未着手」)。
+> `docs/catalog-import-pipeline.md`で「受注確定CSV・売上明細CSV | 未着手」)。
 > このドキュメントは実装前に論点を固定するためのもので、確定した設計ではない。
 
 - 位置づけ: `docs/architecture/domain-rules.md`(clinic-inventory側)の3種類のCSVのうち「受注確定CSV」
-- 姉妹ドキュメント: 商品マスタCSVは[distributor-catalog-import.md](distributor-catalog-import.md)
+- 姉妹ドキュメント: 商品マスタCSVは[catalog-import-backend.md](catalog-import-backend.md)
 - S3バケット・IAMの実設定は[s3-storage.md](s3-storage.md)
 
 最終更新: 2026-08-23
@@ -102,7 +102,7 @@ purchase_order_lines(不変・発注時のスナップショット)
 
 子テーブルは行を積む形のため、**同じCSVが2回届くと二重計上する**(列を上書きする形なら自動的に冪等だった)。
 商品マスタ側と同じく、`s3_key + etag`で取り込み済みを弾く仕組みを受注確定側にも用意する
-(`distributor_catalog_ingestion_runs`と同じ考え方。[design.md](design.md)5章)。
+(`distributor_catalog_ingestion_runs`と同じ考え方。[catalog-import-pipeline.md](catalog-import-pipeline.md)5章)。
 
 ---
 
