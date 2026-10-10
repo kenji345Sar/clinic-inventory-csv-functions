@@ -100,7 +100,8 @@ func main() {
 			needsReview++
 			fmt.Printf("要確認 %s: %s (全%d行 / 読み取れない行%d)\n", obj.Key, result.Message, result.TotalRows, result.InvalidRows)
 		default:
-			fmt.Printf("反映 %s: 全%d行 (新規%d / 更新%d)\n", obj.Key, result.TotalRows, result.Created, result.Updated)
+			fmt.Printf("反映 %s: 全%d行 (新規%d / 更新%d / 変更なし%d / 医院別単価の変更%d)\n",
+				obj.Key, result.TotalRows, result.Created, result.Updated, result.Unchanged, result.PriceChanges)
 		}
 	}
 

@@ -25,14 +25,23 @@ func NewFacilityPrice(distributorProductID, facilityID shareddomain.ID, unitPric
 	if facilityID.IsZero() {
 		return nil, errors.New("クリニックの指定は必須です")
 	}
-	if unitPrice <= 0 {
-		return nil, errors.New("医院別単価は1円以上で指定してください")
+	if err := ValidateFacilityUnitPrice(unitPrice); err != nil {
+		return nil, err
 	}
 	return &FacilityPrice{
 		distributorProductID: distributorProductID,
 		facilityID:           facilityID,
 		unitPrice:            unitPrice,
 	}, nil
+}
+
+// ValidateFacilityUnitPrice は医院別単価が業務ルールを満たすかを確かめる。
+// 取り込みではステージングに積む前に呼ぶ（ValidateCatalogValues と同じ理由）。
+func ValidateFacilityUnitPrice(unitPrice int) error {
+	if unitPrice <= 0 {
+		return errors.New("医院別単価は1円以上で指定してください")
+	}
+	return nil
 }
 
 func (p *FacilityPrice) DistributorProductID() shareddomain.ID { return p.distributorProductID }

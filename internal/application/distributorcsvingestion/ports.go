@@ -39,8 +39,10 @@ type ObjectStore interface {
 }
 
 // FacilityResolver は卸側の医院コードをこちらのクリニックIDに変換するポート。
+// CSVに出てくる医院コードをまとめて渡し、1回で変換する。対応するクリニックが無いコードは
+// 戻り値のmapに含まれない。
 type FacilityResolver interface {
-	Resolve(ctx context.Context, distributorID shareddomain.ID, facilityCode string) (shareddomain.ID, error)
+	ResolveAll(ctx context.Context, distributorID shareddomain.ID, facilityCodes []string) (map[string]shareddomain.ID, error)
 }
 
 // Transactor は複数リポジトリにまたがる反映を1つのトランザクションにまとめるポート。

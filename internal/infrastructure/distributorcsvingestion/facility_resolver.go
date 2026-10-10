@@ -2,7 +2,6 @@ package distributorcsvingestion
 
 import (
 	"context"
-	"fmt"
 
 	shareddomain "clinic-inventory-csv-functions/internal/domain/shared"
 
@@ -27,20 +26,33 @@ func NewFacilityResolver(db *gorm.DB) *FacilityResolver {
 	return &FacilityResolver{db: db}
 }
 
-func (r *FacilityResolver) Resolve(ctx context.Context, distributorID shareddomain.ID, facilityCode string) (shareddomain.ID, error) {
-	id, err := uuid.Parse(facilityCode)
-	if err != nil {
-		return shareddomain.ID{}, fmt.Errorf("医院コード %s をクリニックに突合できません（現状はクリニックIDのUUIDのみ対応）", facilityCode)
+// ResolveAll は医院コードをまとめて1回の問い合わせで変換する。対応するクリニックが無いコード
+// （UUIDでない・facilitiesに無い）は戻り値のmapに含めない。どの行のどのコードかを
+// 人に示せるのは呼び出し側なので、エラーにはせず呼び出し側に判断させる。
+func (r *FacilityResolver) ResolveAll(ctx context.Context, distributorID shareddomain.ID, facilityCodes []string) (map[string]shareddomain.ID, error) {
+	codeByID := make(map[uuid.UUID]string, len(facilityCodes))
+	for _, code := range facilityCodes {
+		if id, err := uuid.Parse(code); err == nil {
+			codeByID[id] = code
+		}
 	}
-	var count int64
+	resolved := make(map[string]shareddomain.ID, len(codeByID))
+	if len(codeByID) == 0 {
+		return resolved, nil
+	}
+	ids := make([]uuid.UUID, 0, len(codeByID))
+	for id := range codeByID {
+		ids = append(ids, id)
+	}
+	var found []uuid.UUID
 	if err := r.db.WithContext(ctx).
 		Table("facilities").
-		Where("id = ?", id).
-		Count(&count).Error; err != nil {
-		return shareddomain.ID{}, err
+		Where("id IN ?", ids).
+		Pluck("id", &found).Error; err != nil {
+		return nil, err
 	}
-	if count == 0 {
-		return shareddomain.ID{}, fmt.Errorf("医院コード %s に対応するクリニックが見つかりません", facilityCode)
+	for _, id := range found {
+		resolved[codeByID[id]] = shareddomain.ID(id)
 	}
-	return shareddomain.ID(id), nil
+	return resolved, nil
 }

@@ -8,7 +8,13 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+// upsertBatchSize は1文のINSERTに並べる行数。PostgreSQLは1文のパラメータ数が65,535までで、
+// 卸商品は1行9列のため、これを超える行数を1文に並べると失敗する。
+// 超える分は同じトランザクションの中で複数文に分けて書く。
+const upsertBatchSize = 1000
 
 type DistributorProductRepository struct {
 	db *gorm.DB
@@ -18,9 +24,20 @@ func NewDistributorProductRepository(db *gorm.DB) *DistributorProductRepository 
 	return &DistributorProductRepository{db: db}
 }
 
+func (r *DistributorProductRepository) FindByDistributor(ctx context.Context, distributorID shareddomain.ID) ([]*distdomain.DistributorProduct, error) {
+	var models []DistributorProductModel
+	if err := r.dbOf(ctx).Where("distributor_id = ?", uuid.UUID(distributorID)).Find(&models).Error; err != nil {
+		return nil, err
+	}
+	products := make([]*distdomain.DistributorProduct, 0, len(models))
+	for _, m := range models {
+		products = append(products, toDomainDistributorProduct(m))
+	}
+	return products, nil
+}
+
 // FindByDistributorAndCode は突合キーで1件引く。見つからない場合は (nil, nil)。
-// 取り込みでは「無い＝新規行」が毎行の正常系のため、Firstではなく Limit(1).Find を使い
-// 「見つからない」をエラー扱いにしない（ログにも出さない）。
+// Firstではなく Limit(1).Find を使い「見つからない」をエラー扱いにしない（ログにも出さない）。
 func (r *DistributorProductRepository) FindByDistributorAndCode(ctx context.Context, distributorID shareddomain.ID, code string) (*distdomain.DistributorProduct, error) {
 	var models []DistributorProductModel
 	err := r.dbOf(ctx).
@@ -36,26 +53,25 @@ func (r *DistributorProductRepository) FindByDistributorAndCode(ctx context.Cont
 	return toDomainDistributorProduct(models[0]), nil
 }
 
-func (r *DistributorProductRepository) Create(ctx context.Context, product *distdomain.DistributorProduct) error {
-	model := toDistributorProductModel(product)
-	return r.dbOf(ctx).Create(&model).Error
-}
-
-// Update は既存の卸商品を上書き保存する。Saveではなく列を指定したUpdatesにしているのは、
-// unit_priceにNULL（単価非公表）を書き戻せるようにするため。
-func (r *DistributorProductRepository) Update(ctx context.Context, product *distdomain.DistributorProduct) error {
-	model := toDistributorProductModel(product)
+// UpsertAll は INSERT … ON CONFLICT (distributor_id, distributor_product_code) DO UPDATE で
+// 新規と変更をまとめて書く。既存の行はidを書き換えず、CSVに載る列だけを上書きする
+// （unit_priceにNULL＝単価非公表を書き戻すこともある）。
+func (r *DistributorProductRepository) UpsertAll(ctx context.Context, products []*distdomain.DistributorProduct) error {
+	if len(products) == 0 {
+		return nil
+	}
+	models := make([]DistributorProductModel, 0, len(products))
+	for _, p := range products {
+		models = append(models, toDistributorProductModel(p))
+	}
 	return r.dbOf(ctx).
-		Model(&DistributorProductModel{}).
-		Where("id = ?", model.ID).
-		Updates(map[string]any{
-			"name":                model.Name,
-			"vendor_name":         model.VendorName,
-			"vendor_product_code": model.VendorProductCode,
-			"jan_code":            model.JANCode,
-			"unit_price":          model.UnitPrice,
-			"discontinued":        model.Discontinued,
-		}).Error
+		Clauses(clause.OnConflict{
+			Columns: []clause.Column{{Name: "distributor_id"}, {Name: "distributor_product_code"}},
+			DoUpdates: clause.AssignmentColumns([]string{
+				"name", "vendor_name", "vendor_product_code", "jan_code", "unit_price", "discontinued",
+			}),
+		}).
+		CreateInBatches(&models, upsertBatchSize).Error
 }
 
 func toDistributorProductModel(p *distdomain.DistributorProduct) DistributorProductModel {

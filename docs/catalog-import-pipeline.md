@@ -130,11 +130,12 @@ D-1002,消毒液 500ml,<医院AのID>,450
 ### 3-2. 2回目以降の取り込みでどうなるか
 
 どちらのパターンも**upsert**なので、同じCSVを何度流しても行は増えない。
+既存の値はその卸の分をまとめて読んでCSVと比べ、変わったものだけを書く（流れは[catalog-csv-to-db-flow.md](catalog-csv-to-db-flow.md)6章）。
 
 | テーブル | 突合キー | 既にある場合 |
 |---|---|---|
-| `distributor_products` | `(distributor_id, distributor_product_code)` | 商品名・ベンダー・JAN・単価・廃盤フラグを上書き |
-| `distributor_product_facility_prices` | `(distributor_product_id, facility_id)` | `unit_price`を上書き |
+| `distributor_products` | `(distributor_id, distributor_product_code)` | 商品名・ベンダー・JAN・単価・廃盤フラグのどれかが違えば上書き。同じなら書かない |
+| `distributor_product_facility_prices` | `(distributor_product_id, facility_id)` | `unit_price`が違えば上書き。同じなら書かない |
 
 **CSVから消えた行は、商品も医院別単価も削除しない**（理由と廃番の扱いは5章）。(B)の卸で、
 ある医院がCSVから消えた場合も医院別単価の行は残る。契約終了を単価CSVの欠落から判断するのは

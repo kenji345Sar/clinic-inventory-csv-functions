@@ -66,9 +66,13 @@ type ImportDistributorCatalogResult struct {
 	Status      ingdomain.Status
 	TotalRows   int
 	InvalidRows int
-	Created     int
-	Updated     int
-	Message     string
+	Created     int // 新規登録した商品数
+	Updated     int // 既にあり、値が変わった商品数
+	Unchanged   int // 既にあり、値が変わらなかった商品数（書き込まない）
+	// PriceChanges は新規・変更のあった医院別単価の件数。商品の値が変わらず
+	// 単価だけ変わることがあるため、商品の件数とは別に数える。
+	PriceChanges int
+	Message      string
 }
 
 func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in ImportDistributorCatalogInput) (ImportDistributorCatalogResult, error) {
@@ -103,6 +107,14 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		return uc.finishAsNeedsReview(ctx, distributorID, in, fmt.Sprintf("CSVを読み取れませんでした: %v", err))
 	}
 
+	// 手順3(続き): 業務ルール（単価が1円以上か）と医院の実在を、ステージングに積む前に確かめる。
+	// 引っかかった行は読み取れない行と同じく理由付きで残り、手順5で止まる（validate_catalog_rows.go）。
+	facilityIDByCode, err := uc.facilities.ResolveAll(ctx, distributorID, facilityCodesOf(rows))
+	if err != nil {
+		return ImportDistributorCatalogResult{}, err
+	}
+	rows = validateCatalogRows(rows, facilityIDByCode)
+
 	// 手順4: 中間表現をステージングに保存する（この時点ではまだ商品マスタは更新しない）。
 	// 書き込み先は distributor_catalog_ingestion_runs（取り込み1回分）と
 	// distributor_catalog_staging_rows（CSV1行分。原文とエラー理由も持つ）。
@@ -131,10 +143,10 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		InvalidRows: len(run.InvalidRows()),
 	}
 
-	// 手順5: 読み取れない行が1行でもあれば反映しない。原因不明のまま一部だけ反映して
+	// 手順5: 読み取れない行・業務ルールに合わない行が1行でもあれば反映しない。原因不明のまま一部だけ反映して
 	// 業務データを壊さないため（backend側のdomain-rules.md「卸連携CSV基盤」）。
 	if result.InvalidRows > 0 {
-		run.MarkNeedsReview(fmt.Sprintf("%d行が読み取れませんでした", result.InvalidRows), uc.now())
+		run.MarkNeedsReview(fmt.Sprintf("%d行に不備があります", result.InvalidRows), uc.now())
 		if err := uc.runRepo.Save(ctx, run); err != nil {
 			return result, err
 		}
@@ -145,9 +157,10 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 
 	// 手順6: ステージングの内容を卸商品マスタへ反映する。1件でも失敗したら
 	// ファイル単位でロールバックし、要確認として残す。
-	created, updated, applyErr := 0, 0, error(nil)
+	var counts applyCounts
 	err = uc.transactor.WithinTx(ctx, func(txCtx context.Context) error {
-		created, updated, applyErr = uc.apply(txCtx, distributorID, run.ValidRows())
+		var applyErr error
+		counts, applyErr = uc.apply(txCtx, distributorID, run.ValidRows(), facilityIDByCode)
 		return applyErr
 	})
 	if err != nil {
@@ -166,13 +179,34 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 		return result, err
 	}
 	result.Status = run.Status()
-	result.Created = created
-	result.Updated = updated
+	result.Created = counts.created
+	result.Updated = counts.updated
+	result.Unchanged = counts.unchanged
+	result.PriceChanges = counts.priceChanges
 	return result, nil
 }
 
-// apply はステージング行を卸商品マスタ・医院別単価へupsertする。
-// 突合キーは(卸業者, 卸商品コード)で、既にあれば更新・無ければ新規登録する。
+type applyCounts struct {
+	created, updated, unchanged, priceChanges int
+}
+
+// facilityPriceKey は医院別単価の同一性（卸商品, クリニック）。
+type facilityPriceKey struct {
+	productID  shareddomain.ID
+	facilityID shareddomain.ID
+}
+
+// apply はステージング行を卸商品マスタ・医院別単価へ反映する。
+//
+// 「読む → 比べる → 書く」の3段で、DBとの往復を行数に比例させない。
+//
+//	読む   … その卸の既存商品・既存の医院別単価を、それぞれ1回で引く
+//	         （医院コードの対応は手順3の続きで引いたものを受け取る）
+//	比べる … メモリ上でCSVの各行と突き合わせ、新規・変更のあったものだけを書き込み対象にする
+//	書く   … 商品、医院別単価の順に、テーブルごとにまとめて INSERT … ON CONFLICT DO UPDATE
+//
+// 業務ルール・医院の実在・重複は手順3の続きで確かめ済みで、ここに来るのはそれを通った行だけ。
+// ドメインの生成・更新もルールを確かめるが、それは呼び出し側が確かめ忘れたときの最後の守り。
 //
 // 書き込み先は2テーブル(docs/catalog-csv-to-db-flow.md 6章)。
 //
@@ -181,65 +215,94 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 //
 // テーブル名はgormが構造体から引くためこの層には現れない。実際の名前は
 // infrastructure/distributorcatalog/model.go の TableName() を参照。
-func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributorID shareddomain.ID, rows []ingdomain.StagingRow) (created, updated int, err error) {
-	for _, row := range rows {
-		existing, err := uc.productRepo.FindByDistributorAndCode(ctx, distributorID, row.DistributorProductCode())
-		if err != nil {
-			return created, updated, err
-		}
+func (uc *ImportDistributorCatalogUseCase) apply(ctx context.Context, distributorID shareddomain.ID, rows []ingdomain.StagingRow, facilityIDByCode map[string]shareddomain.ID) (applyCounts, error) {
+	var counts applyCounts
 
-		var product *distdomain.DistributorProduct
-		if existing == nil {
-			product, err = distdomain.NewDistributorProduct(distributorID, row.DistributorProductCode(), row.Name(), row.VendorName(), row.UnitPrice())
+	// 読む
+	existingProducts, err := uc.productRepo.FindByDistributor(ctx, distributorID)
+	if err != nil {
+		return counts, err
+	}
+	productByCode := make(map[string]*distdomain.DistributorProduct, len(existingProducts))
+	for _, p := range existingProducts {
+		productByCode[p.DistributorProductCode()] = p
+	}
+	existingPrices, err := uc.facilityPriceRepo.FindByDistributor(ctx, distributorID)
+	if err != nil {
+		return counts, err
+	}
+	currentPrice := make(map[facilityPriceKey]int, len(existingPrices))
+	for _, p := range existingPrices {
+		currentPrice[facilityPriceKey{p.DistributorProductID(), p.FacilityID()}] = p.UnitPrice()
+	}
+
+	// 比べる
+	productsToSave := make([]*distdomain.DistributorProduct, 0)
+	queuedProducts := make(map[string]bool) // 書き込み対象に積んだ卸商品コード（同じコードが2行あっても1回だけ積む）
+	pricesToSave := make([]*distdomain.FacilityPrice, 0)
+
+	for _, row := range rows {
+		code := row.DistributorProductCode()
+		product, ok := productByCode[code]
+		if !ok {
+			product, err = distdomain.NewDistributorProduct(distributorID, code, row.Name(), row.VendorName(), row.UnitPrice())
 			if err != nil {
-				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
+				return counts, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 			}
 			product.SetVendorProductCode(row.VendorProductCode())
 			product.SetJANCode(row.JANCode())
 			if row.Discontinued() {
 				product.Discontinue()
 			}
-			// distributor_products へINSERT
-			if err := uc.productRepo.Create(ctx, product); err != nil {
-				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
-			}
-			created++
+			// 同じコードが後の行にもう一度出たら、既存商品として扱う
+			productByCode[code] = product
+			queuedProducts[code] = true
+			productsToSave = append(productsToSave, product)
+			counts.created++
 		} else {
-			product = existing
-			if err := product.ApplyCatalogUpdate(row.Name(), row.VendorName(), row.VendorProductCode(), row.JANCode(), row.UnitPrice(), row.Discontinued()); err != nil {
-				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
+			changed, err := product.UpdateFromDistributorCatalog(row.Name(), row.VendorName(), row.VendorProductCode(), row.JANCode(), row.UnitPrice(), row.Discontinued())
+			if err != nil {
+				return counts, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 			}
-			// distributor_products をUPDATE（CSVに載る列だけ。取り込み対象外の列は触らない）
-			if err := uc.productRepo.Update(ctx, product); err != nil {
-				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
+			switch {
+			case queuedProducts[code]:
+				// このCSVの前の行で既に積んである。積み直さず、上の上書きで後の行の値が勝つ
+			case changed:
+				queuedProducts[code] = true
+				productsToSave = append(productsToSave, product)
+				counts.updated++
+			default:
+				counts.unchanged++
 			}
-			updated++
 		}
 
-		// 医院別単価。卸側の医院コードをこちらのクリニックIDに突合してから保存する。
-		// 商品ごとの単価しか送ってこない卸はここが空になり、下のテーブルには1行も入らない。
-		if len(row.FacilityPrices()) == 0 {
-			continue
-		}
-		prices := make([]*distdomain.FacilityPrice, 0, len(row.FacilityPrices()))
+		// 医院別単価。商品ごとの単価しか送ってこない卸はここが空になり、1件も積まれない。
 		for _, fp := range row.FacilityPrices() {
-			facilityID, err := uc.facilities.Resolve(ctx, distributorID, fp.FacilityCode)
-			if err != nil {
-				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
+			facilityID, ok := facilityIDByCode[fp.FacilityCode]
+			if !ok {
+				return counts, fmt.Errorf("%d行目: 医院コード %s に対応するクリニックが見つかりません", row.RowNo(), fp.FacilityCode)
 			}
+			key := facilityPriceKey{product.ID(), facilityID}
 			price, err := distdomain.NewFacilityPrice(product.ID(), facilityID, fp.UnitPrice)
 			if err != nil {
-				return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
+				return counts, fmt.Errorf("%d行目: %w", row.RowNo(), err)
 			}
-			prices = append(prices, price)
-		}
-		// distributor_product_facility_prices へINSERT ... ON CONFLICT DO UPDATE
-		// （キーは(卸商品, クリニック)。2回目以降は行が増えず単価が上書きされる）
-		if err := uc.facilityPriceRepo.UpsertAll(ctx, prices); err != nil {
-			return created, updated, fmt.Errorf("%d行目: %w", row.RowNo(), err)
+			if current, ok := currentPrice[key]; ok && current == fp.UnitPrice {
+				continue
+			}
+			pricesToSave = append(pricesToSave, price)
+			counts.priceChanges++
 		}
 	}
-	return created, updated, nil
+
+	// 書く。医院別単価は商品IDを参照するため、商品を先に書く。
+	if err := uc.productRepo.UpsertAll(ctx, productsToSave); err != nil {
+		return counts, err
+	}
+	if err := uc.facilityPriceRepo.UpsertAll(ctx, pricesToSave); err != nil {
+		return counts, err
+	}
+	return counts, nil
 }
 
 // finishAsNeedsReview はステージングに1行も入らないまま失敗したケースを記録する。

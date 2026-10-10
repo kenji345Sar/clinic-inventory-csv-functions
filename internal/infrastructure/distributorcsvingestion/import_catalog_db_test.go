@@ -184,6 +184,34 @@ func TestImportDistributorCatalog(t *testing.T) {
 	if !discontinued.Discontinued() {
 		t.Error("廃盤フラグが反映されていない")
 	}
+
+	// 4回目: ETagは変わったが中身は同じ。比べて変わっていないので書き込まない
+	result, err = importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-3"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Created != 0 || result.Updated != 0 || result.Unchanged != 2 {
+		t.Errorf("Created/Updated/Unchanged = %d/%d/%d, want 0/0/2", result.Created, result.Updated, result.Unchanged)
+	}
+
+	// 5回目: 廃盤列が0に戻れば廃盤も解除される（falseへの書き戻し）
+	store[key] = []byte("コード,商品名,メーカー,JAN,単価,廃盤\n" +
+		"D-0001,抗生剤 100mg（改定）,サンプル製薬,4900000000001,1350,0\n" +
+		"D-0002,単価非公表の商品,サンプル製薬,,,0\n")
+	result, err = importCatalog.Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-4"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Updated != 1 || result.Unchanged != 1 {
+		t.Errorf("Updated/Unchanged = %d/%d, want 1/1", result.Updated, result.Unchanged)
+	}
+	revived, err := productRepo.FindByDistributorAndCode(ctx, distributorID, "D-0002")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if revived.Discontinued() {
+		t.Error("廃盤列が0に戻ったのに廃盤のまま")
+	}
 }
 
 // 医院別単価を持つ卸のCSVが、卸商品と医院別単価の両方に反映されることを確認する。
@@ -222,6 +250,113 @@ func TestImportDistributorCatalogWithFacilityPrices(t *testing.T) {
 	}
 	if price != 880 {
 		t.Fatalf("医院別単価が反映されていない: %d", price)
+	}
+
+	// 2回目: 商品の値は同じで単価だけが変わった。商品は書かず、医院別単価だけ書く
+	store[key] = []byte("コード,商品名,医院コード,単価\n" +
+		fmt.Sprintf("D-1001,医院別単価の商品,%s,800\n", facilityID))
+	result, err = newImportUseCase(db, store, parsers).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-2"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Updated != 0 || result.Unchanged != 1 || result.PriceChanges != 1 {
+		t.Errorf("Updated/Unchanged/PriceChanges = %d/%d/%d, want 0/1/1", result.Updated, result.Unchanged, result.PriceChanges)
+	}
+	if err := db.Raw("SELECT unit_price FROM distributor_product_facility_prices WHERE distributor_product_id = ? AND facility_id = ?",
+		uuid.UUID(product.ID()), uuid.UUID(facilityID)).Scan(&price).Error; err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if price != 800 {
+		t.Fatalf("医院別単価の変更が反映されていない: %d", price)
+	}
+}
+
+// 同じ商品×同じ医院の単価が2行あるCSVは、どちらを採るか決められないので反映せず要確認にする。
+// 重複はステージングに積む前に見つかり、その行が理由付きで残る。
+func TestImportDistributorCatalogDuplicateFacilityPrice(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	distributorCode, distributorID, facilityID := setupDistributorAndFacility(t, db)
+
+	key := fmt.Sprintf("catalogs/%s/prices.csv", distributorCode)
+	store := fakeObjectStore{
+		key: []byte("コード,商品名,医院コード,単価\n" +
+			fmt.Sprintf("D-2001,重複のある商品,%s,880\n", facilityID) +
+			fmt.Sprintf("D-2001,重複のある商品,%s,900\n", facilityID)),
+	}
+	parsers := map[string]inginfra.ParseFunc{distributorCode: inginfra.ParseOroshiBCatalogCSV}
+
+	result, err := newImportUseCase(db, store, parsers).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != ingdomain.StatusNeedsReview {
+		t.Fatalf("Status = %s, want needs_review", result.Status)
+	}
+	if result.InvalidRows != 1 {
+		t.Errorf("InvalidRows = %d, want 1", result.InvalidRows)
+	}
+	product, err := distinfra.NewDistributorProductRepository(db).FindByDistributorAndCode(ctx, distributorID, "D-2001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if product != nil {
+		t.Error("要確認で止まった取り込みは、商品も反映されないべき")
+	}
+}
+
+// 業務ルールに合わない行・存在しない医院の行は、反映の前に1行ずつ理由付きでステージングに残る。
+// 反映の途中で見つけたときのように最初の1件で止まらず、不備がすべて分かることを確認する。
+func TestImportDistributorCatalogValidatesBeforeStaging(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	distributorCode, distributorID, facilityID := setupDistributorAndFacility(t, db)
+
+	unknownFacility := uuid.New()
+	key := fmt.Sprintf("catalogs/%s/prices.csv", distributorCode)
+	store := fakeObjectStore{
+		key: []byte("コード,商品名,医院コード,単価\n" +
+			fmt.Sprintf("D-3001,正常な商品,%s,880\n", facilityID) +
+			fmt.Sprintf("D-3002,0円の商品,%s,0\n", facilityID) +
+			fmt.Sprintf("D-3003,存在しない医院の商品,%s,500\n", unknownFacility)),
+	}
+	parsers := map[string]inginfra.ParseFunc{distributorCode: inginfra.ParseOroshiBCatalogCSV}
+
+	result, err := newImportUseCase(db, store, parsers).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != ingdomain.StatusNeedsReview {
+		t.Fatalf("Status = %s, want needs_review", result.Status)
+	}
+	if result.InvalidRows != 2 {
+		t.Fatalf("InvalidRows = %d, want 2", result.InvalidRows)
+	}
+
+	runs, err := inginfra.NewIngestionRunRepository(db).FindByDistributor(ctx, distributorID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	reasons := map[int]string{}
+	for _, row := range runs[0].InvalidRows() {
+		reasons[row.RowNo()] = row.ErrorMessage()
+	}
+	want := map[int]string{
+		3: fmt.Sprintf("医院コード %s: 医院別単価は1円以上で指定してください", facilityID),
+		4: fmt.Sprintf("医院コード %s に対応するクリニックが見つかりません", unknownFacility),
+	}
+	for rowNo, msg := range want {
+		if reasons[rowNo] != msg {
+			t.Errorf("%d行目の理由 = %q, want %q", rowNo, reasons[rowNo], msg)
+		}
+	}
+
+	product, err := distinfra.NewDistributorProductRepository(db).FindByDistributorAndCode(ctx, distributorID, "D-3001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if product != nil {
+		t.Error("要確認で止まった取り込みは、正常行も反映されないべき")
 	}
 }
 
