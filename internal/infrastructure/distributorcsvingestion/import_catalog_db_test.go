@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -408,5 +409,46 @@ func TestImportDistributorCatalogNeedsReview(t *testing.T) {
 	}
 	if invalid[0].Raw() == "" || invalid[0].ErrorMessage() == "" {
 		t.Errorf("原文とエラー理由が残っていない: %+v", invalid[0])
+	}
+}
+
+// PostgreSQLは1文のパラメータ数が65,535まで。ステージング行（13列）は5,041行、
+// 卸商品（9列）は7,281行を超えると1文に並べられないため、分けて書けていることを確認する。
+func TestImportDistributorCatalogLargeFile(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+	distributorCode, distributorID, _ := setupDistributorAndFacility(t, db)
+
+	const rowCount = 5100
+	var csv strings.Builder
+	csv.WriteString("コード,商品名,メーカー,JAN,単価,廃盤\n")
+	for i := 0; i < rowCount; i++ {
+		fmt.Fprintf(&csv, "L-%05d,大量取り込みの商品%d,サンプル製薬,,100,0\n", i, i)
+	}
+	key := fmt.Sprintf("catalogs/%s/large.csv", distributorCode)
+	store := fakeObjectStore{key: []byte(csv.String())}
+	parsers := map[string]inginfra.ParseFunc{distributorCode: inginfra.ParseSamplePharmaCatalogCSV}
+
+	result, err := newImportUseCase(db, store, parsers).Execute(ctx, ingapp.ImportDistributorCatalogInput{DistributorCode: distributorCode, S3Key: key, ETag: "etag-1"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Status != ingdomain.StatusApplied {
+		t.Fatalf("Status = %s (%s), want applied", result.Status, result.Message)
+	}
+	if result.Created != rowCount {
+		t.Errorf("Created = %d, want %d", result.Created, rowCount)
+	}
+
+	// 反映済みにした後も、ステージング行は書き直されず残っていること
+	runs, err := inginfra.NewIngestionRunRepository(db).FindByDistributor(ctx, distributorID)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(runs) != 1 || runs[0].Status() != ingdomain.StatusApplied {
+		t.Fatalf("取り込みの記録が applied で1件あるはず: %d件", len(runs))
+	}
+	if len(runs[0].Rows()) != rowCount {
+		t.Errorf("ステージング行 = %d行, want %d", len(runs[0].Rows()), rowCount)
 	}
 }

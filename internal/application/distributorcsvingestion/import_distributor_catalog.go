@@ -133,7 +133,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 			row.UnitPrice, toStagingFacilityPrices(row.FacilityPrices), row.Discontinued,
 		)
 	}
-	if err := uc.runRepo.Save(ctx, run); err != nil {
+	if err := uc.runRepo.Create(ctx, run); err != nil {
 		return ImportDistributorCatalogResult{}, err
 	}
 
@@ -147,7 +147,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 	// 業務データを壊さないため（backend側のdomain-rules.md「卸連携CSV基盤」）。
 	if result.InvalidRows > 0 {
 		run.MarkNeedsReview(fmt.Sprintf("%d行に不備があります", result.InvalidRows), uc.now())
-		if err := uc.runRepo.Save(ctx, run); err != nil {
+		if err := uc.runRepo.UpdateStatus(ctx, run); err != nil {
 			return result, err
 		}
 		result.Status = run.Status()
@@ -165,7 +165,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 	})
 	if err != nil {
 		run.MarkNeedsReview(fmt.Sprintf("反映に失敗しました: %v", err), uc.now())
-		if saveErr := uc.runRepo.Save(ctx, run); saveErr != nil {
+		if saveErr := uc.runRepo.UpdateStatus(ctx, run); saveErr != nil {
 			return result, saveErr
 		}
 		result.Status = run.Status()
@@ -175,7 +175,7 @@ func (uc *ImportDistributorCatalogUseCase) Execute(ctx context.Context, in Impor
 
 	// 手順7: 反映完了を記録する。
 	run.MarkApplied(uc.now())
-	if err := uc.runRepo.Save(ctx, run); err != nil {
+	if err := uc.runRepo.UpdateStatus(ctx, run); err != nil {
 		return result, err
 	}
 	result.Status = run.Status()
@@ -312,7 +312,7 @@ func (uc *ImportDistributorCatalogUseCase) finishAsNeedsReview(ctx context.Conte
 		return ImportDistributorCatalogResult{}, err
 	}
 	run.MarkNeedsReview(reason, uc.now())
-	if err := uc.runRepo.Save(ctx, run); err != nil {
+	if err := uc.runRepo.Create(ctx, run); err != nil {
 		return ImportDistributorCatalogResult{}, err
 	}
 	return ImportDistributorCatalogResult{Status: run.Status(), Message: reason}, nil

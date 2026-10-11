@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 type IngestionRunRepository struct {
@@ -33,32 +32,41 @@ func (r *IngestionRunRepository) IsAlreadyApplied(ctx context.Context, s3Key, et
 	return count > 0, nil
 }
 
-// Save は取り込み実行とステージング行をトランザクション内でまとめて保存する。
-// 同じ実行を「ステージング済み」→「反映済み」と2回保存するため、実行はupsert、
-// 行は全削除してから入れ直す（発注の明細と同じ方針）。
-func (r *IngestionRunRepository) Save(ctx context.Context, run *ingdomain.IngestionRun) error {
+// stagingRowBatchSize は、ステージング行を1文のINSERTに並べる行数。PostgreSQLは1文のパラメータ数が
+// 65,535までで、ステージング行は1行13列のため、5,041行を超えて1文に並べると失敗する。
+// 超える分は同じトランザクションの中で複数文に分けて書く。
+const stagingRowBatchSize = 1000
+
+// Create は取り込み実行とステージング行をトランザクション内でまとめて保存する。
+func (r *IngestionRunRepository) Create(ctx context.Context, run *ingdomain.IngestionRun) error {
 	runModel, rowModels, err := toIngestionModels(run)
 	if err != nil {
 		return err
 	}
 	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"status", "message", "finished_at"}),
-		}).Create(&runModel).Error; err != nil {
-			return err
-		}
-		if err := tx.Where("ingestion_run_id = ?", runModel.ID).
-			Delete(&IngestionStagingRowModel{}).Error; err != nil {
+		if err := tx.Create(&runModel).Error; err != nil {
 			return err
 		}
 		if len(rowModels) > 0 {
-			if err := tx.Create(&rowModels).Error; err != nil {
+			if err := tx.CreateInBatches(&rowModels, stagingRowBatchSize).Error; err != nil {
 				return err
 			}
 		}
 		return nil
 	})
+}
+
+// UpdateStatus は取り込み実行の1行だけを更新する。Updatesにmapを渡すのは、
+// 反映済みにしたとき message を空文字で上書きできるようにするため（構造体だと空文字は無視される）。
+func (r *IngestionRunRepository) UpdateStatus(ctx context.Context, run *ingdomain.IngestionRun) error {
+	return r.db.WithContext(ctx).
+		Model(&IngestionRunModel{}).
+		Where("id = ?", uuid.UUID(run.ID())).
+		Updates(map[string]any{
+			"status":      string(run.Status()),
+			"message":     run.Message(),
+			"finished_at": run.FinishedAt(),
+		}).Error
 }
 
 func (r *IngestionRunRepository) FindByDistributor(ctx context.Context, distributorID shareddomain.ID) ([]*ingdomain.IngestionRun, error) {

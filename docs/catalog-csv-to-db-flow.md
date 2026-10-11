@@ -341,8 +341,13 @@ B-1003,動物用消毒液 500mL,C0012,880
 ### ステージングに保存する（手順4）
 
 中間表現を `IngestionRun`（取り込み1回分）に詰め、
-[IngestionRunRepository.Save](../internal/infrastructure/distributorcsvingestion/ingestion_run_repository.go#L39)
+[IngestionRunRepository.Create](../internal/infrastructure/distributorcsvingestion/ingestion_run_repository.go#L41)
 でDBに保存する。**この時点ではまだ商品マスタを一切触っていない。**
+
+ステージング行を書くのはこの1回だけ。1文に並べるのは1,000行までで、超える分は同じトランザクションの中で
+複数文に分けて送る（ステージング行は1行13列なので、PostgreSQLの1文65,535パラメータの上限に5,041行で当たる）。
+以降の手順で状態を変えるときは、[UpdateStatus](../internal/infrastructure/distributorcsvingestion/ingestion_run_repository.go#L61)
+で `distributor_catalog_ingestion_runs` の1行だけを更新し、ステージング行は書き直さない。
 
 `distributor_catalog_staging_rows`:
 
@@ -575,8 +580,8 @@ DBを直接直して廃盤にしても、その卸のCSVに載っている限り
 
 ## 7. 完了の記録と2回目以降（手順7）
 
-反映が終わったら `MarkApplied` で `distributor_catalog_ingestion_runs` を更新する
-（`status = applied` / `s3_key` / `etag` / `finished_at`）。
+反映が終わったら `MarkApplied` → `UpdateStatus` で `distributor_catalog_ingestion_runs` の1行を更新する
+（`status = applied` / `message` を空に / `finished_at`）。ステージング行には触らない。
 
 同じファイルをもう一度取り込もうとすると、手順1の `IsAlreadyApplied` が**キー＋ETagの一致**で
 拾ってスキップする。CSVを置き直せば内容が変わりETagも変わるので再取り込みされ、
